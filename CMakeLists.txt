@@ -1,0 +1,53 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(FluidSimulation LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(RELEASE_BUILD OFF)
+else()
+    set(RELEASE_BUILD ON)
+endif()
+
+if (RELEASE_BUILD)
+    message("-- Build Type: Release")
+    if(MSVC)
+        add_compile_options("/O2" "/Ob3" "/Qfast_transcendentals" "${BITCODE}")
+        STRING(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+        STRING(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+        STRING(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+        STRING(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    else()
+        add_compile_options("-g0" "-O3")
+        add_compile_options("-fomit-frame-pointer")
+        add_compile_options("-fno-math-errno" "-ffinite-math-only" "-fno-signed-zeros" "-fno-trapping-math" "-fassociative-math")
+        add_compile_options("-fno-exceptions")
+    endif()
+    set(DISABLE_FORCE_DEBUG_POSTFIX ON)
+    # set(LLGL_BUILD_STATIC_LIB ON CACHE BOOL "")
+    set(LLGL_ENABLE_DEBUG_LAYER OFF CACHE BOOL "" FORCE)
+    set(LLGL_ENABLE_CHECKED_CAST OFF CACHE BOOL "" FORCE)
+    set(LLGL_ENABLE_EXCEPTIONS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+    message("-- Build Type: Debug")
+    if(MSVC)
+        add_compile_options("/DEBUG" "/Od")
+    else()
+        add_compile_options("-ggdb" "-O0")
+    endif()
+    set(DISABLE_FORCE_DEBUG_POSTFIX OFF)
+    set(LLGL_ENABLE_EXCEPTIONS ON CACHE BOOL "" FORCE)
+endif()
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
+
+add_subdirectory(thirdparty/SGE)
+
+file(GLOB_RECURSE SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+
+add_executable(${PROJECT_NAME} )
+
+target_sources(${PROJECT_NAME} PRIVATE ${SRC})
+target_link_libraries(${PROJECT_NAME} PRIVATE SGE)
