@@ -113,7 +113,7 @@ static constexpr GradientKey GRADIENT[] = {
     GradientKey{LinearRgba(222, 33, 33), 1.0f},
 };
 
-float Poly6Kernel(float dst, float radius) {
+static float Poly6Kernel(float dst, float radius) {
     if (dst >= radius) return 0.0f;
 
     float v = (radius*radius) - (dst*dst);
@@ -121,7 +121,7 @@ float Poly6Kernel(float dst, float radius) {
     return v * v * v * scale;
 }
 
-float SpikyKernelDerivative(float dst, float radius) {
+static float SpikyKernelDerivative(float dst, float radius) {
     if (dst >= radius) return 0.0f;
 
     float v = radius - dst;
@@ -129,7 +129,7 @@ float SpikyKernelDerivative(float dst, float radius) {
     return v * v * scale;
 }
 
-float Poly6KernelDerivative(float dst, float radius) {
+static float Poly6KernelDerivative(float dst, float radius) {
     // const float ratio = dst / radius;
     // if (ratio > 2.0f) {
     //     return 0.0f;
@@ -155,7 +155,7 @@ float Poly6KernelDerivative(float dst, float radius) {
 //     return v * scale;
 // }
 
-float SpikySmoothingKernel(float dst, float radius) {
+static float SpikySmoothingKernel(float dst, float radius) {
     if (dst >= radius) {
         return 0.0f;
     }
@@ -164,7 +164,7 @@ float SpikySmoothingKernel(float dst, float radius) {
     return v * v * v / volume;
 }
 
-float SbSmoothingKernel(float dst, float radius) {
+static float SbSmoothingKernel(float dst, float radius) {
     if (dst >= radius) {
         return 0.0f;
     }
@@ -173,14 +173,14 @@ float SbSmoothingKernel(float dst, float radius) {
     return v * v * 6.0f / (PI * glm::pow(radius, 4.0f));
 }
 
-float sb_smoothing_kernel_derivative(float dst, float radius) {
+static float sb_smoothing_kernel_derivative(float dst, float radius) {
     if (dst >= radius) {
         return 0.0f;
     }
     return (dst - radius) * 12.0 / (PI * glm::pow(radius, 4.0f));
 }
 
-float CubicSplineKernel(float dst, float h) {
+static float CubicSplineKernel(float dst, float h) {
     float coeff = 40.0f / 7.0f / PI;
     coeff /= (h * h);
     const float q = dst / h;
@@ -194,7 +194,7 @@ float CubicSplineKernel(float dst, float h) {
     return kernel_val;
 }
 
-glm::vec2 CubicSplineKernelDerivative(glm::vec2 r, float dst, float h) {
+static glm::vec2 CubicSplineKernelDerivative(glm::vec2 r, float dst, float h) {
     float coeff = 80.0f / 7.0f / PI;
     coeff /= (h * h * h);
     glm::vec2 derivative = glm::vec2(0.0f);
@@ -209,69 +209,69 @@ glm::vec2 CubicSplineKernelDerivative(glm::vec2 r, float dst, float h) {
     return derivative;
 }
 
-float Poly6ScalingFactor(float radius) {
+static float Poly6ScalingFactor(float radius) {
     return 4.0f / (PI * glm::pow(radius, 8.0f));
 }
-float SpikyPow3ScalingFactor(float radius) {
+static float SpikyPow3ScalingFactor(float radius) {
     return 10.0f / (PI * glm::pow(radius, 5.0f));
 }
-float SpikyPow2ScalingFactor(float radius) {
+static float SpikyPow2ScalingFactor(float radius) {
     return 6.0f / (PI * glm::pow(radius, 4.0f));
 }
-float SpikyPow3DerivativeScalingFactor(float radius) {
+static float SpikyPow3DerivativeScalingFactor(float radius) {
     return 30.0f / (glm::pow(radius, 5.0f) * PI);
 }
 
-float SpikyPow2DerivativeScalingFactor(float radius) {
+static float SpikyPow2DerivativeScalingFactor(float radius) {
     return 12.0f / (glm::pow(radius, 4.0f) * PI);
 }
 
-float SmoothingKernelPoly6(float dst, float radius) {
+static float SmoothingKernelPoly6(float dst, float radius) {
 	if (dst >= radius) return 0.0f;
 
     float v = radius * radius - dst * dst;
     return v * v * v * Poly6ScalingFactor(radius);
 }
 
-float SpikyKernelPow3(float dst, float radius) {
+static float SpikyKernelPow3(float dst, float radius) {
     if (dst >= radius) return 0.0f;
 
     float v = radius - dst;
     return v * v * v * SpikyPow3ScalingFactor(radius);
 }
 
-float SpikyKernelPow2(float dst, float radius) {
+static float SpikyKernelPow2(float dst, float radius) {
 	if (dst >= radius) return 0.0f;
 
     float v = radius - dst;
     return v * v * SpikyPow2ScalingFactor(radius);
 }
 
-float DerivativeSpikyPow3(float dst, float radius) {
+static float DerivativeSpikyPow3(float dst, float radius) {
 	if (dst >= radius) return 0.0f;
 
     float v = radius - dst;
     return -v * v * SpikyPow3DerivativeScalingFactor(radius);
 }
 
-float DerivativeSpikyPow2(float dst, float radius) {
+static float DerivativeSpikyPow2(float dst, float radius) {
 	if (dst >= radius) return 0.0f;
 
     float v = radius - dst;
     return -v * SpikyPow2DerivativeScalingFactor(radius);
 }
 
-float DensityKernel(float dst, float radius)
+static float DensityKernel(float dst, float radius)
 {
 	return Poly6Kernel(dst, radius);
 }
 
-float DensityKernelDerivative(float dst, float radius)
+static float DensityKernelDerivative(float dst, float radius)
 {
 	return SpikyKernelDerivative(dst, radius);
 }
 
-float ViscosityKernel(float dst, float radius)
+static float ViscosityKernel(float dst, float radius)
 {
 	return SmoothingKernelPoly6(dst, radius);
 }
@@ -332,7 +332,7 @@ static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& po
 //     }
 // }
 
-float CalculateDensity(size_t index) {
+static float CalculateDensity(size_t index) {
     float density = DensityKernel(0.0f, SMOOTHING_RADIUS) * MASS;
 
     const glm::vec2 point = g.predicted_positions[index];
@@ -544,11 +544,7 @@ static void UpdateSpatialLookup(float radius) {
     };
 }
 
-void pre_update() {
-
-}
-
-void fixed_update() {
+static void FixedUpdate() {
     const float dt = Time::FixedDeltaSeconds();
 
     UpdateSpatialLookup(LOOKUP_RADIUS);
@@ -595,7 +591,7 @@ void fixed_update() {
     }).wait();
 }
 
-void update() {
+static void Update() {
     if (Input::JustPressed(Key::G)) {
         g.gravity = !g.gravity;
     }
@@ -636,11 +632,7 @@ void update() {
     }
 }
 
-void post_update() {
-
-}
-
-void render() {
+static void Render() {
     Renderer& renderer = Engine::Renderer();
 
     renderer.Begin(g.camera);
@@ -731,7 +723,7 @@ void render() {
     renderer.End();
 }
 
-void post_render() {
+static void PostRender() {
 #if SGE_DEBUG
     if (Input::Pressed(Key::C)) {
         Engine::Renderer().PrintDebugInfo();
@@ -739,21 +731,19 @@ void post_render() {
 #endif
 }
 
-void window_resized(uint32_t width, uint32_t height, uint32_t w , uint32_t h) {
+static void WindowResized(uint32_t width, uint32_t height, uint32_t w , uint32_t h) {
     g.camera.set_viewport(glm::uvec2(width, height));
     g.camera.update();
     InitParticles();
-    render();
+    Render();
 }
 
 bool App::Init(RenderBackend backend, AppConfig config) {
-    Engine::SetPreUpdateCallback(pre_update);
-    Engine::SetUpdateCallback(update);
-    Engine::SetPostUpdateCallback(post_update);
-    Engine::SetFixedUpdateCallback(fixed_update);
-    Engine::SetRenderCallback(render);
-    Engine::SetPostRenderCallback(post_render);
-    Engine::SetWindowResizeCallback(window_resized);
+    Engine::SetUpdateCallback(Update);
+    Engine::SetFixedUpdateCallback(FixedUpdate);
+    Engine::SetRenderCallback(Render);
+    Engine::SetPostRenderCallback(PostRender);
+    Engine::SetWindowResizeCallback(WindowResized);
 
     glm::uvec2 window_size = glm::uvec2(1280, 720);
 
