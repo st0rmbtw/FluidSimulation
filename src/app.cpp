@@ -21,13 +21,13 @@
 using namespace sge;
 
 static constexpr float PI = glm::pi<float>();
-static constexpr float PIXELS_IN_METER = 1.0f;
+static constexpr float PIXELS_IN_METER = 5.0f;
 static constexpr float PIXEL_TO_METER = 1.0f / PIXELS_IN_METER;
 static constexpr float METER_TO_PIXEL = PIXELS_IN_METER;
 
-static constexpr size_t PARTICLE_COUNT = 4000;
-static constexpr float PARTICLE_SIZE = 8.0f * PIXEL_TO_METER; // m
-static constexpr float GRAVITY = 9.8f * 10.0f * PIXEL_TO_METER;
+static constexpr size_t PARTICLE_COUNT = 6000;
+static constexpr float PARTICLE_SIZE = 7.0f * PIXEL_TO_METER; // m
+static constexpr float GRAVITY = 9.8f * 100.0f * PIXEL_TO_METER;
 static constexpr float MASS = 18.0f * (PARTICLE_SIZE * PARTICLE_SIZE);
 static constexpr float SMOOTHING_RADIUS = 3.0f * PARTICLE_SIZE * 0.5f; // m
 static constexpr float COLLISION_DAMPING = 0.9f;
@@ -35,10 +35,9 @@ static constexpr float VISCOSITY_STRENGTH = 0.1f;
 static constexpr float TARGET_DENSITY = 1000.0f * (PARTICLE_SIZE * PARTICLE_SIZE);
 
 static constexpr float SPEED_OF_SOUND = 20.0f; // m/s
-static constexpr float PRESSURE_MULTIPLIER = 10.0f * MASS;
-static constexpr float INTERACTION_RADIUS = 100.0f * PIXEL_TO_METER;
+static constexpr float PRESSURE_MULTIPLIER = 100.0f * PIXELS_IN_METER * MASS;
+static constexpr float INTERACTION_RADIUS = 150.0f * PIXEL_TO_METER;
 static constexpr float INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 2.0f;
-static constexpr float NEAR_PRESSURE_MULTIPLIER = PRESSURE_MULTIPLIER / 15.0f;
 
 static constexpr float LOOKUP_RADIUS = SMOOTHING_RADIUS;
 
@@ -274,7 +273,7 @@ float DensityKernelDerivative(float dst, float radius)
 
 float ViscosityKernel(float dst, float radius)
 {
-	return Poly6KernelDerivative(dst, radius);
+	return SmoothingKernelPoly6(dst, radius);
 }
 
 static glm::ivec2 PositionToCellCoord(glm::vec2 position, float radius) {
@@ -294,7 +293,7 @@ static size_t GetKeyFromHash(size_t hash) {
 }
 
 template <typename F>
-static void ForEachNeighbor(glm::vec2 position, const F& func) {
+static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& positions, F&& func) {
     static constexpr float SQR_RADIUS = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
 
     const glm::ivec2 center = PositionToCellCoord(position, LOOKUP_RADIUS);
@@ -307,19 +306,19 @@ static void ForEachNeighbor(glm::vec2 position, const F& func) {
             if (g.spatial_lookup[i].cell_key != key) break;
 
             size_t particle_index = g.spatial_lookup[i].index;
-            glm::vec2 offset = g.positions[particle_index] - position;
+            glm::vec2 offset = positions[particle_index] - position;
             float sqr_dst = glm::dot(offset, offset);
 
             if (sqr_dst < SQR_RADIUS) {
                 float dst = glm::sqrt(sqr_dst);
-                func(particle_index, offset, dst);
+                std::forward<F>(func)(particle_index, offset, dst);
             }
         }
     }
 }
 
 // template <typename F>
-// static void ForEachNeighbor(glm::vec2 position, const F& func) {
+// static void ForEachNeighbor(glm::vec2 position, F&& func) {
 //     static constexpr float SQR_RADIUS = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
 
 //     for (size_t j = 0; j < PARTICLE_COUNT; ++j) {
@@ -328,7 +327,7 @@ static void ForEachNeighbor(glm::vec2 position, const F& func) {
 
 //         if (sqr_dst < SQR_RADIUS) {
 //             float dst = glm::sqrt(sqr_dst);
-//             func(j, offset, dst);
+//             std::forward<F>(func)(j, offset, dst);
 //         }
 //     }
 // }
@@ -338,7 +337,7 @@ float CalculateDensity(size_t index) {
 
     const glm::vec2 point = g.predicted_positions[index];
 
-    ForEachNeighbor(point, [index, &density](size_t i, glm::vec2 offset, float dst) {
+    ForEachNeighbor(point, g.predicted_positions, [index, &density](size_t i, glm::vec2 offset, float dst) {
         if (i != index) {
             density += MASS * DensityKernel(dst, SMOOTHING_RADIUS);
         }
@@ -393,7 +392,7 @@ static float ConvertDensityToPressure(float density) {
     // float ratio = density / TARGET_DENSITY;
     // float pressure = PRESSURE_MULTIPLIER * (glm::pow(ratio, 7.0f) - 1.0f);
 
-    float density_error = density - TARGET_DENSITY;
+    float density_error = TARGET_DENSITY - density;
     float pressure = density_error * PRESSURE_MULTIPLIER;
     return pressure;
 }
@@ -406,7 +405,7 @@ static glm::vec2 CalculatePressureForce(size_t index) {
     float density_i = g.densities[index];
     float pressure_i = ConvertDensityToPressure(density_i);
 
-    ForEachNeighbor(point, [index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
+    ForEachNeighbor(point, g.predicted_positions, [index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
         if (j == index) return;
 
         glm::vec2 dir = dst > glm::epsilon<float>()
@@ -418,7 +417,11 @@ static glm::vec2 CalculatePressureForce(size_t index) {
         float density_j = g.densities[j];
         float pressure_j = ConvertDensityToPressure(density_j);
 
-        pressure_force += MASS * (pressure_i / (density_i * density_i) + pressure_j / (density_j * density_j)) * slope;
+        float shared_pressure = (pressure_i + pressure_j) * 0.5f;
+
+        // pressure_force += MASS * (pressure_i / (density_i * density_i) + pressure_j / (density_j * density_j)) * slope;
+        pressure_force -= MASS * shared_pressure * slope / density_j;
+
     });
 
     return pressure_force;
@@ -452,13 +455,15 @@ static glm::vec2 CalculateViscosityForce(size_t index) {
 
     const glm::vec2 point = g.positions[index];
 
-    ForEachNeighbor(point, [index, &viscosity_force](size_t i, glm::vec2 offset, float dst) {
+    ForEachNeighbor(point, g.positions, [index, &viscosity_force](size_t i, glm::vec2 offset, float dst) {
+        if (index == i) return;
+
         float influence = ViscosityKernel(dst, SMOOTHING_RADIUS);
         float density = g.densities[i];
-        viscosity_force += (g.velocities[i] - g.velocities[index]) * MASS * influence / density;
+        viscosity_force += MASS * (g.velocities[i] - g.velocities[index]) * influence;
     });
 
-    return -viscosity_force * VISCOSITY_STRENGTH;
+    return viscosity_force * VISCOSITY_STRENGTH;
 }
 
 static void ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
@@ -558,9 +563,7 @@ void fixed_update() {
 
     g.pool.submit_loop(0, PARTICLE_COUNT, [dt](size_t i) {
         const glm::vec2 acceleration = g.forces[i] / MASS * dt;
-        g.predicted_positions[i] = g.positions[i] + acceleration * dt;
-        // g.predicted_positions[i] = g.positions[i] + g.velocities[i] * dt;
-
+        g.predicted_positions[i] = g.positions[i] + g.velocities[i] * dt + acceleration * dt;
         g.densities[i] = CalculateDensity(i);
     }).wait();
 
@@ -685,7 +688,6 @@ void render() {
                 const size_t index = g.spatial_lookup[i].index;
 
                 LinearRgba color = g.colors[index];
-                // LinearRgba color = GRADIENT[0].color;
                 const glm::vec2 pos = g.positions[index] * METER_TO_PIXEL;
 
                 for (size_t j = 0; j < 9; ++j) {
