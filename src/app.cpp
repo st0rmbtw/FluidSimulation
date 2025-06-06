@@ -11,11 +11,12 @@
 #include <SGE/types/blend_mode.hpp>
 #include <SGE/log.hpp>
 #include <SGE/time/stopwatch.hpp>
+#include <SGE/utils/gradient.hpp>
 
 #include <glm/trigonometric.hpp>
 #include <glm/gtc/random.hpp>
+#include <glm/ext/scalar_constants.hpp>
 
-#include "glm/ext/scalar_constants.hpp"
 #include "thread_pool.hpp"
 
 using namespace sge;
@@ -36,8 +37,10 @@ static constexpr float TARGET_DENSITY = 1000.0f * (PARTICLE_SIZE * PARTICLE_SIZE
 
 static constexpr float SPEED_OF_SOUND = 20.0f; // m/s
 static constexpr float PRESSURE_MULTIPLIER = 100.0f * PIXELS_IN_METER * MASS;
-static constexpr float INTERACTION_RADIUS = 150.0f * PIXEL_TO_METER;
-static constexpr float INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 2.0f;
+
+static constexpr float INTERACTION_RADIUS = 200.0f * PIXEL_TO_METER;
+static constexpr float PULL_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 3.5f;
+static constexpr float PUSH_INTERACTION_STRENGTH = PULL_INTERACTION_STRENGTH * 2.0f;
 
 static constexpr float LOOKUP_RADIUS = SMOOTHING_RADIUS;
 
@@ -53,12 +56,19 @@ static constexpr glm::ivec2 CELL_OFFSETS[] = {
     glm::ivec2(-1, 1),
 };
 
+static constexpr GradientKey GRADIENT[] = {
+    GradientKey{LinearRgba(13, 72, 209), 0.0f},
+    GradientKey{LinearRgba(73, 214, 153), 0.45f},
+    GradientKey{LinearRgba(235, 215, 66), 0.68f},
+    GradientKey{LinearRgba(222, 33, 33), 1.0f},
+};
+
 struct Cell {
     size_t index;
     size_t cell_key;
 };
 
-static struct GameState {
+static struct AppState {
     Camera camera = Camera(CameraOrigin::TopLeft);
     BS::thread_pool<> pool;
     Batch batch;
@@ -79,54 +89,26 @@ static struct GameState {
     bool show_debug_info = false;
 } g;
 
-
-struct GradientKey {
-    LinearRgba color;
-    float position;
-};
-
-template <size_t SIZE>
-LinearRgba GradientEvaluate(const GradientKey (&keys)[SIZE], float position) {
-    if (SIZE == 0)
-        return LinearRgba::black();
-
-    if (position <= keys[0].position)
-        return keys[0].color;
-
-    if (position >= keys[SIZE - 1].position)
-        return keys[SIZE - 1].color;
-
-    for (size_t i = 0; i < SIZE - 1; ++i) {
-        if (position >= keys[i].position && position <= keys[i + 1].position) {
-            float t = (position - keys[i].position) / (keys[i + 1].position - keys[i].position);
-            return keys[i].color.lerp(keys[i + 1].color, t);
-        }
-    }
-
-    return LinearRgba::black();
+static inline float Poly6KernelScale(float radius) {
+    return 4.0f / (PI * glm::pow(radius, 8.0f));
 }
-
-static constexpr GradientKey GRADIENT[] = {
-    GradientKey{LinearRgba(13, 72, 209), 0.0f},
-    GradientKey{LinearRgba(73, 214, 153), 0.45f},
-    GradientKey{LinearRgba(235, 215, 66), 0.68f},
-    GradientKey{LinearRgba(222, 33, 33), 1.0f},
-};
 
 static float Poly6Kernel(float dst, float radius) {
     if (dst >= radius) return 0.0f;
 
     float v = (radius*radius) - (dst*dst);
-    float scale = 4.0f / (PI * glm::pow(radius, 8.0f));
-    return v * v * v * scale;
+    return v * v * v;
+}
+
+static float SpikyKernelDerivativeScale(float radius) {
+    return -30.0f / (PI * glm::pow(radius, 5.0f));
 }
 
 static float SpikyKernelDerivative(float dst, float radius) {
     if (dst >= radius) return 0.0f;
 
     float v = radius - dst;
-    float scale = -30.0f / (PI * glm::pow(radius, 5.0f));
-    return v * v * scale;
+    return v * v;
 }
 
 static float Poly6KernelDerivative(float dst, float radius) {
@@ -261,17 +243,27 @@ static float DerivativeSpikyPow2(float dst, float radius) {
     return -v * SpikyPow2DerivativeScalingFactor(radius);
 }
 
-static float DensityKernel(float dst, float radius)
+static inline float DensityKernel(float dst, float radius)
 {
 	return Poly6Kernel(dst, radius);
 }
 
-static float DensityKernelDerivative(float dst, float radius)
+static inline float DensityKernelScale(float radius)
+{
+	return Poly6KernelScale(radius);
+}
+
+static inline float DensityKernelDerivative(float dst, float radius)
 {
 	return SpikyKernelDerivative(dst, radius);
 }
 
-static float ViscosityKernel(float dst, float radius)
+static inline float DensityKernelDerivativeScale(float radius)
+{
+	return SpikyKernelDerivativeScale(radius);
+}
+
+static inline float ViscosityKernel(float dst, float radius)
 {
 	return SmoothingKernelPoly6(dst, radius);
 }
@@ -318,11 +310,11 @@ static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& po
 }
 
 // template <typename F>
-// static void ForEachNeighbor(glm::vec2 position, F&& func) {
+// static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& positions, F&& func) {
 //     static constexpr float SQR_RADIUS = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
 
 //     for (size_t j = 0; j < PARTICLE_COUNT; ++j) {
-//         glm::vec2 offset = g.predicted_positions[j] - position;
+//         glm::vec2 offset = positions[j] - position;
 //         float sqr_dst = glm::dot(offset, offset);
 
 //         if (sqr_dst < SQR_RADIUS) {
@@ -331,6 +323,10 @@ static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& po
 //         }
 //     }
 // }
+
+static inline glm::vec2 RandomDir() {
+    return glm::linearRand(glm::vec2(-1.0f), glm::vec2(1.0f));
+}
 
 static float CalculateDensity(size_t index) {
     float density = DensityKernel(0.0f, SMOOTHING_RADIUS) * MASS;
@@ -343,7 +339,7 @@ static float CalculateDensity(size_t index) {
         }
     });
 
-    return density;
+    return density * DensityKernelScale(SMOOTHING_RADIUS);
 }
 
 static void InitParticles() {
@@ -408,23 +404,21 @@ static glm::vec2 CalculatePressureForce(size_t index) {
     ForEachNeighbor(point, g.predicted_positions, [index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
         if (j == index) return;
 
-        glm::vec2 dir = dst > glm::epsilon<float>()
-            ? (offset / dst)
-            : glm::linearRand(glm::vec2(-1.0f), glm::vec2(1.0f));
+        const glm::vec2 dir = dst > glm::epsilon<float>() ? (offset / dst) : RandomDir();
 
-        glm::vec2 slope = DensityKernelDerivative(dst, SMOOTHING_RADIUS) * dir;
+        const glm::vec2 slope = DensityKernelDerivative(dst, SMOOTHING_RADIUS) * dir;
 
-        float density_j = g.densities[j];
-        float pressure_j = ConvertDensityToPressure(density_j);
+        const float density_j = g.densities[j];
+        const float pressure_j = ConvertDensityToPressure(density_j);
 
-        float shared_pressure = (pressure_i + pressure_j) * 0.5f;
+        const float shared_pressure = (pressure_i + pressure_j) * 0.5f;
 
         // pressure_force += MASS * (pressure_i / (density_i * density_i) + pressure_j / (density_j * density_j)) * slope;
         pressure_force -= MASS * shared_pressure * slope / density_j;
 
     });
 
-    return pressure_force;
+    return pressure_force * DensityKernelDerivativeScale(SMOOTHING_RADIUS);
 }
 
 static glm::vec2 CalculateExternalForces(size_t index) {
@@ -441,7 +435,7 @@ static glm::vec2 CalculateExternalForces(size_t index) {
 
         if (sqr_dst < INTERACTION_RADIUS * INTERACTION_RADIUS) {
             const float dst = glm::sqrt(sqr_dst);
-            const glm::vec2 dir = dst > glm::epsilon<float>() ? offset / dst : glm::vec2(0.0f);
+            const glm::vec2 dir = dst > glm::epsilon<float>() ? offset / dst : RandomDir();
             float scale = 1.0f - dst / INTERACTION_RADIUS;
             return (dir * g.interaction_strength - g.velocities[index]) * scale;
         }
@@ -614,10 +608,12 @@ static void Update() {
         }
         g.selection_rect.max = Input::MouseScreenPosition();
         g.selection = true;
-    } else if (g.selection) {
+    } else if (Input::Pressed(Key::LeftShift) && g.selection) {
         if (g.selection_rect.width() > 0.0f && g.selection_rect.height() > 0.0f) {
             g.obstacles.push_back(g.selection_rect * PIXEL_TO_METER);
         }
+        g.selection = false;
+    } else {
         g.selection = false;
     }
 
@@ -625,9 +621,9 @@ static void Update() {
 
     if (!g.selection) {
         if (Input::Pressed(MouseButton::Left)) {
-            g.interaction_strength = -INTERACTION_STRENGTH;
+            g.interaction_strength = -PUSH_INTERACTION_STRENGTH;
         } else if (Input::Pressed(MouseButton::Right)) {
-            g.interaction_strength = INTERACTION_STRENGTH;
+            g.interaction_strength = PULL_INTERACTION_STRENGTH;
         }
     }
 }
@@ -645,7 +641,6 @@ static void Render() {
                 .color = LinearRgba::transparent(),
                 .border_thickness = 1.0f,
                 .border_color = LinearRgba(73, 214, 153),
-                .border_radius = glm::vec4(1.0f),
                 .anchor = Anchor::TopLeft
             });
         }
@@ -656,7 +651,6 @@ static void Render() {
                 .color = LinearRgba::transparent(),
                 .border_thickness = 1.0f,
                 .border_color = LinearRgba(73, 214, 153),
-                .border_radius = glm::vec4(1.0f),
                 .anchor = Anchor::TopLeft
             });
         }
