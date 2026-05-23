@@ -19,14 +19,15 @@ inline void print_render_backends() {
 #define str_eq(a, b) strcmp(a, b) == 0
 
 int main(int argc, char** argv) {
-#if SGE_PLATFORM_WINDOWS
-    sge::RenderBackend backend = sge::RenderBackend::D3D11;
-#elif SGE_PLATFORM_MACOS
-    sge::RenderBackend backend = sge::RenderBackend::Metal;
-#else
-    sge::RenderBackend backend = sge::RenderBackend::OpenGL;
-#endif
-    sge::AppConfig config;
+    AppConfig config;
+
+    #if SGE_PLATFORM_WINDOWS
+        config.backend = sge::RenderBackend::D3D11;
+    #elif SGE_PLATFORM_MACOS
+        config.backend = sge::RenderBackend::Metal;
+    #else
+        config.backend = sge::RenderBackend::OpenGL;
+    #endif
 
     for (int i = 1; i < argc; i++) {
         if (str_eq(argv[i], "--pause")) {
@@ -42,16 +43,16 @@ int main(int argc, char** argv) {
             const char* arg = argv[i + 1];
 
             if (str_eq(arg, "vulkan")) {
-                backend = sge::RenderBackend::Vulkan;
+                config.backend = sge::RenderBackend::Vulkan;
             } else
 
             #ifdef SGE_PLATFORM_WINDOWS
             if (str_eq(arg, "d3d12")) {
-                backend = sge::RenderBackend::D3D12;
+                config.backend = sge::RenderBackend::D3D12;
             } else
             
             if (str_eq(arg, "d3d11")) {
-                backend = sge::RenderBackend::D3D11;
+                config.backend = sge::RenderBackend::D3D11;
             } else
             #endif
 
@@ -62,7 +63,7 @@ int main(int argc, char** argv) {
             #endif
 
             if (str_eq(arg, "opengl")) {
-                backend = sge::RenderBackend::OpenGL;
+                config.backend = sge::RenderBackend::OpenGL;
             } else {
                 printf("Unknown render backend: \"%s\". ", arg);
                 print_render_backends();
@@ -75,10 +76,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (App::Init(backend, config)) {
-        App::Run();
+    App app(config);
+    if (app.Init()) {
+        app.Run();
     }
-    App::Destroy();
 
     return 0;
 }

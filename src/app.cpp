@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "spatial_lookup.hpp"
 
 #include <SGE/engine.hpp>
 #include <SGE/renderer/renderer.hpp>
@@ -12,21 +13,21 @@
 #include <SGE/log.hpp>
 #include <SGE/time/stopwatch.hpp>
 #include <SGE/utils/gradient.hpp>
+#include <SGE/profile.hpp>
 
 #include <glm/trigonometric.hpp>
 #include <glm/gtc/random.hpp>
 #include <glm/ext/scalar_constants.hpp>
 
-#include "thread_pool.hpp"
-
 using namespace sge;
 
 static constexpr float PI = glm::pi<float>();
-static constexpr float PIXELS_IN_METER = 5.0f;
+
+static constexpr size_t PARTICLE_COUNT = 12000;
+static constexpr float PIXELS_IN_METER = 3.0f;
 static constexpr float PIXEL_TO_METER = 1.0f / PIXELS_IN_METER;
 static constexpr float METER_TO_PIXEL = PIXELS_IN_METER;
 
-static constexpr size_t PARTICLE_COUNT = 6000;
 static constexpr float PARTICLE_SIZE = 7.0f * PIXEL_TO_METER; // m
 static constexpr float GRAVITY = 9.8f * 100.0f * PIXEL_TO_METER;
 static constexpr float MASS = 18.0f * (PARTICLE_SIZE * PARTICLE_SIZE);
@@ -39,22 +40,10 @@ static constexpr float SPEED_OF_SOUND = 20.0f; // m/s
 static constexpr float PRESSURE_MULTIPLIER = 100.0f * PIXELS_IN_METER * MASS;
 
 static constexpr float INTERACTION_RADIUS = 200.0f * PIXEL_TO_METER;
-static constexpr float PULL_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 3.5f;
+static constexpr float PULL_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 2.0f;
 static constexpr float PUSH_INTERACTION_STRENGTH = PULL_INTERACTION_STRENGTH * 2.0f;
 
 static constexpr float LOOKUP_RADIUS = SMOOTHING_RADIUS;
-
-static constexpr glm::ivec2 CELL_OFFSETS[] = {
-    glm::ivec2(0, 0),
-    glm::ivec2(-1, 0),
-    glm::ivec2(-1, -1),
-    glm::ivec2(0, -1),
-    glm::ivec2(1, -1),
-    glm::ivec2(1, 0),
-    glm::ivec2(1, 1),
-    glm::ivec2(0, 1),
-    glm::ivec2(-1, 1),
-};
 
 static constexpr GradientKey GRADIENT[] = {
     GradientKey{LinearRgba(13, 72, 209), 0.0f},
@@ -62,32 +51,6 @@ static constexpr GradientKey GRADIENT[] = {
     GradientKey{LinearRgba(235, 215, 66), 0.68f},
     GradientKey{LinearRgba(222, 33, 33), 1.0f},
 };
-
-struct Cell {
-    size_t index;
-    size_t cell_key;
-};
-
-static struct AppState {
-    Camera camera = Camera(CameraOrigin::TopLeft);
-    BS::thread_pool<> pool;
-    Batch batch;
-    std::vector<glm::vec2> positions;
-    std::vector<glm::vec2> predicted_positions;
-    std::vector<glm::vec2> velocities;
-    std::vector<glm::vec2> forces;
-    std::vector<float> densities;
-    std::vector<LinearRgba> colors;
-    std::vector<Rect> obstacles;
-    std::vector<Cell> spatial_lookup;
-    std::vector<size_t> start_indices;
-    Rect selection_rect;
-    float interaction_strength = 0.0f;
-    bool paused = false;
-    bool gravity = false;
-    bool selection = false;
-    bool show_debug_info = false;
-} g;
 
 static inline float Poly6KernelScale(float radius) {
     return 4.0f / (PI * glm::pow(radius, 8.0f));
@@ -268,47 +231,6 @@ static inline float ViscosityKernel(float dst, float radius)
 	return SmoothingKernelPoly6(dst, radius);
 }
 
-static glm::ivec2 PositionToCellCoord(glm::vec2 position, float radius) {
-    int x = position.x / radius;
-    int y = position.y / radius;
-    return {x, y};
-}
-
-static size_t HashCell(glm::ivec2 pos) {
-    size_t a = pos.x * 15823;
-    size_t b = pos.y * 9737333;
-    return a + b;
-}
-
-static size_t GetKeyFromHash(size_t hash) {
-    return hash % g.spatial_lookup.size();
-}
-
-template <typename F>
-static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& positions, F&& func) {
-    static constexpr float SQR_RADIUS = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
-
-    const glm::ivec2 center = PositionToCellCoord(position, LOOKUP_RADIUS);
-
-    for (const glm::ivec2& offset : CELL_OFFSETS) {
-        size_t key = GetKeyFromHash(HashCell(center + offset));
-        size_t start_index = g.start_indices[key];
-
-        for (size_t i = start_index; i < g.spatial_lookup.size(); ++i) {
-            if (g.spatial_lookup[i].cell_key != key) break;
-
-            size_t particle_index = g.spatial_lookup[i].index;
-            glm::vec2 offset = positions[particle_index] - position;
-            float sqr_dst = glm::dot(offset, offset);
-
-            if (sqr_dst < SQR_RADIUS) {
-                float dst = glm::sqrt(sqr_dst);
-                std::forward<F>(func)(particle_index, offset, dst);
-            }
-        }
-    }
-}
-
 // template <typename F>
 // static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& positions, F&& func) {
 //     static constexpr float SQR_RADIUS = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
@@ -328,12 +250,12 @@ static inline glm::vec2 RandomDir() {
     return glm::linearRand(glm::vec2(-1.0f), glm::vec2(1.0f));
 }
 
-static float CalculateDensity(size_t index) {
+float App::CalculateDensity(size_t index) {
     float density = DensityKernel(0.0f, SMOOTHING_RADIUS) * MASS;
 
-    const glm::vec2 point = g.predicted_positions[index];
+    const glm::vec2 point = m_predicted_positions[index];
 
-    ForEachNeighbor(point, g.predicted_positions, [index, &density](size_t i, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(SMOOTHING_RADIUS, point, m_predicted_positions, [index, &density](size_t i, glm::vec2 offset, float dst) {
         if (i != index) {
             density += MASS * DensityKernel(dst, SMOOTHING_RADIUS);
         }
@@ -342,9 +264,9 @@ static float CalculateDensity(size_t index) {
     return density * DensityKernelScale(SMOOTHING_RADIUS);
 }
 
-static void InitParticles() {
-    const float width = g.camera.viewport().x;
-    const float height = g.camera.viewport().y;
+void App::InitParticles() {
+    const float width = m_camera.viewport().width;
+    const float height = m_camera.viewport().height;
 
     float x = (width / 2.0f) * PIXEL_TO_METER;
     float y = (height / 2.0f) * PIXEL_TO_METER;
@@ -356,9 +278,9 @@ static void InitParticles() {
     while (index < PARTICLE_COUNT) {
         for (int i = 0; i < glm::min(PARTICLE_COUNT, index+s)-index; ++i) {
             glm::vec2 pos = glm::vec2(x, y);
-            g.positions[index] = pos;
-            g.predicted_positions[index] = pos;
-            g.velocities[index] = glm::vec2(0.0);
+            m_positions[index] = pos;
+            m_predicted_positions[index] = pos;
+            m_velocities[index] = glm::vec2(0.0);
             index += 1;
 
             switch (direction) {
@@ -378,8 +300,8 @@ static void InitParticles() {
             s++;
     }
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [](size_t i) {
-        g.densities[i] = CalculateDensity(i);
+    m_pool.submit_loop(0, PARTICLE_COUNT, [this](size_t i) {
+        m_densities[i] = CalculateDensity(i);
     }).wait();
 }
 
@@ -393,22 +315,22 @@ static float ConvertDensityToPressure(float density) {
     return pressure;
 }
 
-static glm::vec2 CalculatePressureForce(size_t index) {
+glm::vec2 App::CalculatePressureForce(size_t index) {
     glm::vec2 pressure_force = glm::vec2(0.0f);
 
-    const glm::vec2 point = g.predicted_positions[index];
+    const glm::vec2 point = m_predicted_positions[index];
 
-    float density_i = g.densities[index];
+    float density_i = m_densities[index];
     float pressure_i = ConvertDensityToPressure(density_i);
 
-    ForEachNeighbor(point, g.predicted_positions, [index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(SMOOTHING_RADIUS, point, m_predicted_positions, [this, index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
         if (j == index) return;
 
         const glm::vec2 dir = dst > glm::epsilon<float>() ? (offset / dst) : RandomDir();
 
         const glm::vec2 slope = DensityKernelDerivative(dst, SMOOTHING_RADIUS) * dir;
 
-        const float density_j = g.densities[j];
+        const float density_j = m_densities[j];
         const float pressure_j = ConvertDensityToPressure(density_j);
 
         const float shared_pressure = (pressure_i + pressure_j) * 0.5f;
@@ -421,48 +343,48 @@ static glm::vec2 CalculatePressureForce(size_t index) {
     return pressure_force * DensityKernelDerivativeScale(SMOOTHING_RADIUS);
 }
 
-static glm::vec2 CalculateExternalForces(size_t index) {
+glm::vec2 App::CalculateExternalForces(size_t index) {
     glm::vec2 gravity_force = glm::vec2(0.0f);
 
-    if (g.gravity) {
+    if (m_gravity) {
         gravity_force.y = GRAVITY;
     }
 
-    if (!approx_equals(g.interaction_strength, 0.0f)) {
-        const glm::vec2 input_pos = Input::MouseScreenPosition() * PIXEL_TO_METER;
-        const glm::vec2 offset = input_pos - g.positions[index];
+    if (!approx_equals(m_interaction_strength, 0.0f)) {
+        const glm::vec2 input_pos = Input::CursorPosition() * PIXEL_TO_METER;
+        const glm::vec2 offset = input_pos - m_positions[index];
         const float sqr_dst = glm::dot(offset, offset);
 
         if (sqr_dst < INTERACTION_RADIUS * INTERACTION_RADIUS) {
             const float dst = glm::sqrt(sqr_dst);
             const glm::vec2 dir = dst > glm::epsilon<float>() ? offset / dst : RandomDir();
             float scale = 1.0f - dst / INTERACTION_RADIUS;
-            return (dir * g.interaction_strength - g.velocities[index]) * scale;
+            return (dir * m_interaction_strength - m_velocities[index]) * scale;
         }
     }
 
     return gravity_force * MASS;
 }
 
-static glm::vec2 CalculateViscosityForce(size_t index) {
+glm::vec2 App::CalculateViscosityForce(size_t index) {
     glm::vec2 viscosity_force = glm::vec2(0.0f);
 
-    const glm::vec2 point = g.positions[index];
+    const glm::vec2 point = m_positions[index];
 
-    ForEachNeighbor(point, g.positions, [index, &viscosity_force](size_t i, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(SMOOTHING_RADIUS, point, m_positions, [this, index, &viscosity_force](size_t i, glm::vec2 offset, float dst) {
         if (index == i) return;
 
         float influence = ViscosityKernel(dst, SMOOTHING_RADIUS);
-        float density = g.densities[i];
-        viscosity_force += MASS * (g.velocities[i] - g.velocities[index]) * influence;
+        float density = m_densities[i];
+        viscosity_force += MASS * (m_velocities[i] - m_velocities[index]) * influence;
     });
 
     return viscosity_force * VISCOSITY_STRENGTH;
 }
 
-static void ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
-    const float width = (g.camera.viewport().x) * PIXEL_TO_METER;
-    const float height = (g.camera.viewport().y) * PIXEL_TO_METER;
+void App::ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
+    const float width = (m_camera.viewport().width) * PIXEL_TO_METER;
+    const float height = (m_camera.viewport().height) * PIXEL_TO_METER;
 
     const float half_size = PARTICLE_SIZE / 2.0f;
 
@@ -486,7 +408,7 @@ static void ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
         velocity.y *= -1.0f * COLLISION_DAMPING;
     }
 
-    for (const Rect& b : g.obstacles) {
+    for (const Rect& b : m_obstacles) {
         const Rect a = Rect::from_center_size(position, glm::vec2(PARTICLE_SIZE));
 
         // check to see if the two rectangles are intersecting
@@ -513,89 +435,101 @@ static void ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
     }
 }
 
-static void UpdateSpatialLookup(float radius) {
+void App::UpdateSpatialLookup(float radius) {
     for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
-        const glm::ivec2 coord = PositionToCellCoord(g.positions[i], radius);
-        size_t cell_key = GetKeyFromHash(HashCell(coord));
-        g.spatial_lookup[i] = Cell{i, cell_key};
-        g.start_indices[i] = SIZE_MAX;
+        const glm::ivec2 coord = SpatialLookup::PositionToCellCoord(m_positions[i], radius);
+        size_t cell_key = m_lookup.GetKeyFromHash(SpatialLookup::HashCell(coord));
+        m_lookup.SetCell(i, SpatialLookup::Cell{i, cell_key});
+        m_lookup.SetStartIndex(i, SIZE_MAX);
     };
 
-    std::sort(
-        g.spatial_lookup.begin(),
-        g.spatial_lookup.end(),
-        [](const Cell& a, const Cell& b) {
-            return a.cell_key < b.cell_key;
-        }
-    );
+    m_lookup.Sort();
 
     for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
-        size_t key = g.spatial_lookup[i].cell_key;
-        size_t prev_key = i == 0 ? SIZE_MAX : g.spatial_lookup[i - 1].cell_key;
+        size_t key = m_lookup.GetCell(i).key;
+        size_t prev_key = i == 0 ? SIZE_MAX : m_lookup.GetCell(i - 1).key;
         if (key != prev_key) {
-            g.start_indices[key] = i;
+            m_lookup.SetStartIndex(key, i);
         }
     };
 }
 
-static void FixedUpdate() {
+void App::OnFixedUpdate() {
     const float dt = Time::FixedDeltaSeconds();
 
     UpdateSpatialLookup(LOOKUP_RADIUS);
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [dt](size_t i) {
-        g.forces[i] += CalculateViscosityForce(i);
-    }).wait();
+    {
+        ZoneScopedN("CalculateViscosityForce Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            m_forces[i] += CalculateViscosityForce(i);
+        }).wait();
+    }
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [dt](size_t i) {
-        g.forces[i] += CalculateExternalForces(i);
-    }).wait();
+    {
+        ZoneScopedN("CalculateExternalForces Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            m_forces[i] += CalculateExternalForces(i);
+        }).wait();
+    }
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [dt](size_t i) {
-        const glm::vec2 acceleration = g.forces[i] / MASS * dt;
-        g.predicted_positions[i] = g.positions[i] + g.velocities[i] * dt + acceleration * dt;
-        g.densities[i] = CalculateDensity(i);
-    }).wait();
+    {
+        ZoneScopedN("CalculateDensity Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            const glm::vec2 acceleration = m_forces[i] / MASS * dt;
+            m_predicted_positions[i] = m_positions[i] + m_velocities[i] * dt + acceleration * dt;
+            m_densities[i] = CalculateDensity(i);
+        }).wait();
+    }
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [dt](size_t i) {
-        g.forces[i] -= CalculatePressureForce(i) / g.densities[i];
-    }).wait();
+    {
+        ZoneScopedN("CalculatePressureForce Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            m_forces[i] -= CalculatePressureForce(i) / m_densities[i];
+        }).wait();
+    }
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [dt](size_t i) {
-        glm::vec2 acceleration = g.forces[i] / MASS;
-        g.velocities[i] += acceleration * dt;
+    {
+        ZoneScopedN("Update position & velocity Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            glm::vec2 acceleration = m_forces[i] / MASS;
+            m_velocities[i] += acceleration * dt;
 
-        glm::vec2 next_position = g.positions[i] + g.velocities[i] * dt;
-        ResolveCollisions(next_position, g.velocities[i]);
+            glm::vec2 next_position = m_positions[i] + m_velocities[i] * dt;
+            ResolveCollisions(next_position, m_velocities[i]);
 
-        g.positions[i] = next_position;
-        g.forces[i] = glm::zero<glm::vec2>();
-    }).wait();
+            m_positions[i] = next_position;
+            m_forces[i] = glm::zero<glm::vec2>();
+        }).wait();
+    }
 
     float velocity_max = 10.0f;
     for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
-        const glm::vec2& v = g.velocities[i];
+        const glm::vec2& v = m_velocities[i];
         velocity_max = std::max(velocity_max, glm::dot(v, v));
     }
 
-    g.pool.submit_loop(0, PARTICLE_COUNT, [dt, velocity_max](size_t i) {
-        const glm::vec2 v = g.velocities[i];
-        float t = glm::dot(v, v) / velocity_max;
-        g.colors[i] = GradientEvaluate(GRADIENT, t);
-    }).wait();
+    {
+        ZoneScopedN("GradientEvaluation Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt, velocity_max](size_t i) {
+            const glm::vec2 v = m_velocities[i];
+            float t = glm::dot(v, v) / velocity_max;
+            m_colors[i] = GradientEvaluate(GRADIENT, t);
+        }).wait();
+    }
 }
 
-static void Update() {
+void App::OnUpdate() {
     if (Input::JustPressed(Key::G)) {
-        g.gravity = !g.gravity;
+        m_gravity = !m_gravity;
     }
 
     if (Input::JustPressed(Key::D)) {
-        g.show_debug_info = !g.show_debug_info;
+        m_show_debug_info = !m_show_debug_info;
     }
 
     if (Input::JustPressed(Key::C)) {
-        g.obstacles.clear();
+        m_obstacles.clear();
     }
 
     if (Input::JustPressed(Key::R)) {
@@ -603,41 +537,39 @@ static void Update() {
     }
 
     if (Input::Pressed(Key::LeftShift) && Input::Pressed(MouseButton::Left)) {
-        if (!g.selection) {
-            g.selection_rect = Rect::from_top_left(Input::MouseScreenPosition(), glm::vec2(0.0f));
+        if (!m_selection) {
+            m_selection_rect = Rect::from_top_left(Input::CursorPosition(), glm::vec2(0.0f));
         }
-        g.selection_rect.max = Input::MouseScreenPosition();
-        g.selection = true;
-    } else if (Input::Pressed(Key::LeftShift) && g.selection) {
-        if (g.selection_rect.width() > 0.0f && g.selection_rect.height() > 0.0f) {
-            g.obstacles.push_back(g.selection_rect * PIXEL_TO_METER);
+        m_selection_rect.max = Input::CursorPosition();
+        m_selection = true;
+    } else if (Input::Pressed(Key::LeftShift) && m_selection) {
+        if (m_selection_rect.width() > 0.0f && m_selection_rect.height() > 0.0f) {
+            m_obstacles.push_back(m_selection_rect * PIXEL_TO_METER);
         }
-        g.selection = false;
+        m_selection = false;
     } else {
-        g.selection = false;
+        m_selection = false;
     }
 
-    g.interaction_strength = 0.0f;
+    m_interaction_strength = 0.0f;
 
-    if (!g.selection) {
+    if (!m_selection) {
         if (Input::Pressed(MouseButton::Left)) {
-            g.interaction_strength = -PUSH_INTERACTION_STRENGTH;
+            m_interaction_strength = -PUSH_INTERACTION_STRENGTH;
         } else if (Input::Pressed(MouseButton::Right)) {
-            g.interaction_strength = PULL_INTERACTION_STRENGTH;
+            m_interaction_strength = PULL_INTERACTION_STRENGTH;
         }
     }
 }
 
-static void Render() {
-    Renderer& renderer = Engine::Renderer();
+void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
+    m_renderer->Begin();
 
-    renderer.Begin(g.camera);
-
-    g.batch.BeginOrderMode();
+    m_batch->BeginOrderMode();
     {
-        if (g.selection) {
-            g.batch.DrawRect(g.selection_rect.min, {
-                .size = g.selection_rect.size(),
+        if (m_selection) {
+            m_batch->DrawRect(m_selection_rect.min, {
+                .size = m_selection_rect.size(),
                 .color = LinearRgba::transparent(),
                 .border_thickness = 1.0f,
                 .border_color = LinearRgba(73, 214, 153),
@@ -645,8 +577,8 @@ static void Render() {
             });
         }
 
-        for (const Rect& rect : g.obstacles) {
-            g.batch.DrawRect(rect.min * METER_TO_PIXEL, {
+        for (const Rect& rect : m_obstacles) {
+            m_batch->DrawRect(rect.min * METER_TO_PIXEL, {
                 .size = rect.size() * METER_TO_PIXEL,
                 .color = LinearRgba::transparent(),
                 .border_thickness = 1.0f,
@@ -655,35 +587,35 @@ static void Render() {
             });
         }
 
-        if (g.show_debug_info) {
-            g.batch.DrawCircle(Input::MouseScreenPosition(), {
+        if (m_show_debug_info) {
+            m_batch->DrawCircle(Input::CursorPosition(), {
                 .radius = LOOKUP_RADIUS * 2.0f * METER_TO_PIXEL,
                 .color = LinearRgba::transparent(),
                 .border_thickness = 1.0f,
                 .border_color = LinearRgba(73, 214, 153),
             });
 
-            const glm::ivec2 center = PositionToCellCoord(Input::MouseScreenPosition() * PIXEL_TO_METER, LOOKUP_RADIUS);
+            const glm::ivec2 center = SpatialLookup::PositionToCellCoord(Input::CursorPosition() * PIXEL_TO_METER, LOOKUP_RADIUS);
 
             size_t keys[9] = {};
             for (size_t i = 0; i < 9; ++i) {
-                keys[i] = GetKeyFromHash(HashCell(center + CELL_OFFSETS[i]));
+                keys[i] = m_lookup.GetKeyFromHash(SpatialLookup::HashCell(center + SpatialLookup::CELL_OFFSETS[i]));
             }
 
-            for (size_t i = 0; i < g.spatial_lookup.size(); ++i) {
-                const size_t index = g.spatial_lookup[i].index;
+            for (size_t i = 0; i < m_lookup.GetSize(); ++i) {
+                const size_t index = m_lookup.GetCell(i).index;
 
-                LinearRgba color = g.colors[index];
-                const glm::vec2 pos = g.positions[index] * METER_TO_PIXEL;
+                LinearRgba color = m_colors[index];
+                const glm::vec2 pos = m_positions[index] * METER_TO_PIXEL;
 
                 for (size_t j = 0; j < 9; ++j) {
-                    if (g.spatial_lookup[i].cell_key == keys[j]) {
+                    if (m_lookup.GetCell(i).key == keys[j]) {
                         color = LinearRgba::red();
                         break;
                     }
                 }
 
-                g.batch.DrawCircle(pos, {
+                m_batch->DrawCircle(pos, {
                     .radius = PARTICLE_SIZE / 2.0f * METER_TO_PIXEL,
                     .color = color,
                     .anchor = Anchor::Center
@@ -691,10 +623,10 @@ static void Render() {
             }
         } else {
             for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
-                const LinearRgba& color = g.colors[i];
-                const glm::vec2 pos = g.positions[i] * METER_TO_PIXEL;
+                const LinearRgba& color = m_colors[i];
+                const glm::vec2 pos = m_positions[i] * METER_TO_PIXEL;
 
-                g.batch.DrawCircle(pos, {
+                m_batch->DrawCircle(pos, {
                     .radius = PARTICLE_SIZE / 2.0f * METER_TO_PIXEL,
                     .color = color,
                     .anchor = Anchor::Center
@@ -702,86 +634,68 @@ static void Render() {
             }
         }
     }
-    g.batch.EndOrderMode();
+    m_batch->EndOrderMode();
 
-    renderer.BeginMainPass();
-        renderer.Clear(LLGL::ClearValue(0.0f, 0.0f, 0.0f, 1.0f));
+    m_renderer->BeginPass(window, m_camera);
+        m_renderer->Clear(LLGL::ClearValue(0.0f, 0.0f, 0.0f, 1.0f));
 
-        renderer.PrepareBatch(g.batch);
-        renderer.UploadBatchData();
-        renderer.RenderBatch(g.batch);
+        m_renderer->PrepareBatch(*m_batch);
+        m_renderer->UploadBatchData();
+        m_renderer->RenderBatch(*m_batch);
 
-        g.batch.Reset();
-    renderer.EndPass();
+        m_batch->Reset();
+    m_renderer->EndPass();
 
-    renderer.End();
+    m_renderer->End();
+    GetRenderContext()->Present(window);
 }
 
-static void PostRender() {
-#if SGE_DEBUG
-    if (Input::Pressed(Key::C)) {
-        Engine::Renderer().PrintDebugInfo();
-    }
-#endif
-}
-
-static void WindowResized(uint32_t width, uint32_t height, uint32_t w , uint32_t h) {
-    g.camera.set_viewport(glm::uvec2(width, height));
-    g.camera.update();
-    InitParticles();
-    Render();
-}
-
-bool App::Init(RenderBackend backend, AppConfig config) {
-    Engine::SetUpdateCallback(Update);
-    Engine::SetFixedUpdateCallback(FixedUpdate);
-    Engine::SetRenderCallback(Render);
-    Engine::SetPostRenderCallback(PostRender);
-    Engine::SetWindowResizeCallback(WindowResized);
+bool App::OnInit() {
+    if (!InitRenderContext(m_config.backend))
+        return false;
 
     glm::uvec2 window_size = glm::uvec2(1280, 720);
 
-    WindowSettings settings;
-    settings.width = window_size.x;
-    settings.height = window_size.y;
-    settings.fullscreen = config.fullscreen;
-    settings.vsync = config.vsync;
-    settings.hidden = true;
-    settings.samples = 8;
-
-    LLGL::Extent2D resolution;
-    if (!Engine::Init(backend, settings, resolution)) return false;
+    WindowSettings window_settings;
+    window_settings.width = window_size.x;
+    window_settings.height = window_size.y;
+    window_settings.fullscreen = m_config.fullscreen;
+    window_settings.vsync = m_config.vsync;
+    window_settings.hidden = true;
+    window_settings.samples = 8;
 
     Time::SetFixedTimestepSeconds(1.0 / 360.0);
 
-    g.camera.set_viewport({resolution.width, resolution.height});
-    g.camera.set_zoom(1.0f);
-    g.camera.update();
+    auto result = CreateWindow(window_settings);
+    if (!result.has_value()) {
+        SGE_LOG_ERROR("Couldn't create a window: {}", result.error());
+        return false;
+    }
 
-    g.batch.SetIsUi(true);
+    std::shared_ptr<sge::GlfwWindow> window = result.value();
+    m_primary_window_id = window->GetID();
 
-    Engine::ShowWindow();
+    m_renderer = std::make_unique<Renderer>(GetRenderContext());
+    m_batch = m_renderer->CreateBatch();
+    m_batch->SetIsUi(true);
 
-    g.positions.resize(PARTICLE_COUNT);
-    g.predicted_positions.resize(PARTICLE_COUNT);
-    g.velocities.resize(PARTICLE_COUNT);
-    g.densities.resize(PARTICLE_COUNT);
-    g.colors.resize(PARTICLE_COUNT);
-    g.forces.resize(PARTICLE_COUNT);
+    m_camera.set_viewport(window->GetContentSize());
+    m_camera.set_zoom(1.0f);
+    m_camera.update();
 
-    g.spatial_lookup.resize(PARTICLE_COUNT);
-    g.start_indices.resize(PARTICLE_COUNT);
+    m_positions.resize(PARTICLE_COUNT);
+    m_predicted_positions.resize(PARTICLE_COUNT);
+    m_velocities.resize(PARTICLE_COUNT);
+    m_densities.resize(PARTICLE_COUNT);
+    m_colors.resize(PARTICLE_COUNT);
+    m_forces.resize(PARTICLE_COUNT);
+
+    m_lookup.Resize(PARTICLE_COUNT);
 
     InitParticles();
 
+    window->ShowWindow();
+
     return true;
-}
-
-void App::Run() {
-    Engine::Run();
-}
-
-void App::Destroy() {
-    Engine::Destroy();
 }
 

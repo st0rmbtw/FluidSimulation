@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 project(FluidSimulation LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(RELEASE_BUILD OFF)
@@ -21,7 +21,6 @@ if (RELEASE_BUILD)
     else()
         add_compile_options("-g0" "-O3")
         add_compile_options("-fomit-frame-pointer")
-        add_compile_options("-fno-math-errno" "-ffinite-math-only" "-fno-signed-zeros" "-fno-trapping-math" "-fassociative-math")
         add_compile_options("-fno-exceptions")
     endif()
     set(DISABLE_FORCE_DEBUG_POSTFIX ON)
@@ -42,6 +41,8 @@ else()
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
+
+set(LLGL_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 add_subdirectory(thirdparty/SGE)
 
