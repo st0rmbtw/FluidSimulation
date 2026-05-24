@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "spatial_lookup.hpp"
+#include "kernels.hpp"
 
 #include <SGE/engine.hpp>
 #include <SGE/renderer/renderer.hpp>
@@ -23,27 +24,51 @@ using namespace sge;
 
 static constexpr float PI = glm::pi<float>();
 
+// static constexpr size_t PARTICLE_COUNT = 12000;
+// static constexpr float PIXELS_IN_METER = 1280.0f / 8.0f;
+// static constexpr float PIXEL_TO_METER = 1.0f / PIXELS_IN_METER;
+// static constexpr float METER_TO_PIXEL = PIXELS_IN_METER;
+
+// static constexpr float PARTICLE_SIZE = 0.026f; // m
+
+// static constexpr float GRAVITY = 9.8f;
+// static constexpr float TARGET_DENSITY = 1000.0f;
+// static constexpr float MASS = TARGET_DENSITY * PARTICLE_SIZE * PARTICLE_SIZE;
+
+// static constexpr float SMOOTHING_RADIUS = 3.0f * PARTICLE_SIZE; // m
+// static constexpr float COLLISION_DAMPING = 0.9f;
+// static constexpr float VISCOSITY_STRENGTH = 0.15f;
+
+// static constexpr float SPEED_OF_SOUND = 15.0f; // m/s
+// static constexpr float PRESSURE_MULTIPLIER = SPEED_OF_SOUND * SPEED_OF_SOUND * TARGET_DENSITY / 7.0f;
+
+// static constexpr float INTERACTION_RADIUS = 200.0f * PIXEL_TO_METER;
+// static constexpr float PUSH_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER / 10000.0f;
+// static constexpr float PULL_INTERACTION_STRENGTH = PUSH_INTERACTION_STRENGTH / 2.0f;
+
 static constexpr size_t PARTICLE_COUNT = 12000;
 static constexpr float PIXELS_IN_METER = 3.0f;
 static constexpr float PIXEL_TO_METER = 1.0f / PIXELS_IN_METER;
 static constexpr float METER_TO_PIXEL = PIXELS_IN_METER;
 
-static constexpr float PARTICLE_SIZE = 7.0f * PIXEL_TO_METER; // m
+static constexpr float PARTICLE_SIZE = 5.0f * PIXEL_TO_METER; // m
+
 static constexpr float GRAVITY = 9.8f * 100.0f * PIXEL_TO_METER;
-static constexpr float MASS = 18.0f * (PARTICLE_SIZE * PARTICLE_SIZE);
-static constexpr float SMOOTHING_RADIUS = 3.0f * PARTICLE_SIZE * 0.5f; // m
+static constexpr float TARGET_DENSITY = 1000.0f;
+static constexpr float MASS = 10.0f;
+
+static constexpr float SMOOTHING_RADIUS = 2.0f * PARTICLE_SIZE; // m
 static constexpr float COLLISION_DAMPING = 0.9f;
 static constexpr float VISCOSITY_STRENGTH = 0.1f;
-static constexpr float TARGET_DENSITY = 1000.0f * (PARTICLE_SIZE * PARTICLE_SIZE);
 
-static constexpr float SPEED_OF_SOUND = 20.0f; // m/s
+static constexpr float SPEED_OF_SOUND = 15.0f; // m/s
 static constexpr float PRESSURE_MULTIPLIER = 100.0f * PIXELS_IN_METER * MASS;
 
 static constexpr float INTERACTION_RADIUS = 200.0f * PIXEL_TO_METER;
 static constexpr float PULL_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 2.0f;
 static constexpr float PUSH_INTERACTION_STRENGTH = PULL_INTERACTION_STRENGTH * 2.0f;
 
-static constexpr float LOOKUP_RADIUS = SMOOTHING_RADIUS;
+static constexpr float LOOKUP_RADIUS = 1.5f * SMOOTHING_RADIUS;
 
 static constexpr GradientKey GRADIENT[] = {
     GradientKey{LinearRgba(13, 72, 209), 0.0f},
@@ -52,216 +77,41 @@ static constexpr GradientKey GRADIENT[] = {
     GradientKey{LinearRgba(222, 33, 33), 1.0f},
 };
 
-static inline float Poly6KernelScale(float radius) {
-    return 4.0f / (PI * glm::pow(radius, 8.0f));
-}
 
-static float Poly6Kernel(float dst, float radius) {
-    if (dst >= radius) return 0.0f;
-
-    float v = (radius*radius) - (dst*dst);
-    return v * v * v;
-}
-
-static float SpikyKernelDerivativeScale(float radius) {
-    return -30.0f / (PI * glm::pow(radius, 5.0f));
-}
-
-static float SpikyKernelDerivative(float dst, float radius) {
-    if (dst >= radius) return 0.0f;
-
-    float v = radius - dst;
-    return v * v;
-}
-
-static float Poly6KernelDerivative(float dst, float radius) {
-    // const float ratio = dst / radius;
-    // if (ratio > 2.0f) {
-    //     return 0.0f;
-    // }
-    // const float normalization = 15.0f / (14.0f * PI * radius*radius);
-    // if (0.0f <= ratio && ratio < 1.0f) {
-    //     return normalization * (9.0f * ratio*ratio - 12.0 * ratio);
-    // }
-    // return 3.0f * normalization * (2.0f - ratio) * (2.0f - ratio);
-
-    if (dst >= radius) return 0.0f;
-
-    float v = radius - dst;
-    float scale = 12.0f / (glm::pow(radius, 4.0f) * glm::pi<float>());
-    return -v * scale;
-}
-
-// float ViscosityKernel(float dst, float radius) {
-//     if (dst >= radius) return 0.0f;
-
-//     float v = radius - dst;
-//     float scale = 40.0f / (PI * glm::pow(radius, 5.0f));
-//     return v * scale;
-// }
-
-static float SpikySmoothingKernel(float dst, float radius) {
-    if (dst >= radius) {
-        return 0.0f;
-    }
-    const float volume = PI * glm::pow(radius, 6.0f) / 15.0f;
-    const float v = (radius - dst);
-    return v * v * v / volume;
-}
-
-static float SbSmoothingKernel(float dst, float radius) {
-    if (dst >= radius) {
-        return 0.0f;
-    }
-    const float v = radius - dst;
-
-    return v * v * 6.0f / (PI * glm::pow(radius, 4.0f));
-}
-
-static float sb_smoothing_kernel_derivative(float dst, float radius) {
-    if (dst >= radius) {
-        return 0.0f;
-    }
-    return (dst - radius) * 12.0 / (PI * glm::pow(radius, 4.0f));
-}
-
-static float CubicSplineKernel(float dst, float h) {
-    float coeff = 40.0f / 7.0f / PI;
-    coeff /= (h * h);
-    const float q = dst / h;
-    float kernel_val = 0.0;
-    if (q <= 1.0) {
-        if (q <= 0.5)
-            kernel_val = coeff * (1.0f - 6.0f * (q * q) + 6.0f * (q * q * q));
-        else
-            kernel_val = coeff * (2.0f * (1.0f - q) * (1.0f - q) * (1.0f - q));
-    }
-    return kernel_val;
-}
-
-static glm::vec2 CubicSplineKernelDerivative(glm::vec2 r, float dst, float h) {
-    float coeff = 80.0f / 7.0f / PI;
-    coeff /= (h * h * h);
-    glm::vec2 derivative = glm::vec2(0.0f);
-    float q = dst / h;
-    glm::vec2 r_hat = dst > 1e-7f ? r / dst : r / (dst + 1e-7f);
-    if (q <= 1.0) {
-        if (q <= 0.5)
-            derivative = coeff * (9.0f * q * q - 6.0f * q) * r_hat;
-        else
-            derivative = coeff * (-3.0f * (1.0f - q) * (1.0f - q)) * r_hat;
-    }
-    return derivative;
-}
-
-static float Poly6ScalingFactor(float radius) {
-    return 4.0f / (PI * glm::pow(radius, 8.0f));
-}
-static float SpikyPow3ScalingFactor(float radius) {
-    return 10.0f / (PI * glm::pow(radius, 5.0f));
-}
-static float SpikyPow2ScalingFactor(float radius) {
-    return 6.0f / (PI * glm::pow(radius, 4.0f));
-}
-static float SpikyPow3DerivativeScalingFactor(float radius) {
-    return 30.0f / (glm::pow(radius, 5.0f) * PI);
-}
-
-static float SpikyPow2DerivativeScalingFactor(float radius) {
-    return 12.0f / (glm::pow(radius, 4.0f) * PI);
-}
-
-static float SmoothingKernelPoly6(float dst, float radius) {
-	if (dst >= radius) return 0.0f;
-
-    float v = radius * radius - dst * dst;
-    return v * v * v * Poly6ScalingFactor(radius);
-}
-
-static float SpikyKernelPow3(float dst, float radius) {
-    if (dst >= radius) return 0.0f;
-
-    float v = radius - dst;
-    return v * v * v * SpikyPow3ScalingFactor(radius);
-}
-
-static float SpikyKernelPow2(float dst, float radius) {
-	if (dst >= radius) return 0.0f;
-
-    float v = radius - dst;
-    return v * v * SpikyPow2ScalingFactor(radius);
-}
-
-static float DerivativeSpikyPow3(float dst, float radius) {
-	if (dst >= radius) return 0.0f;
-
-    float v = radius - dst;
-    return -v * v * SpikyPow3DerivativeScalingFactor(radius);
-}
-
-static float DerivativeSpikyPow2(float dst, float radius) {
-	if (dst >= radius) return 0.0f;
-
-    float v = radius - dst;
-    return -v * SpikyPow2DerivativeScalingFactor(radius);
-}
-
-static inline float DensityKernel(float dst, float radius)
+static inline float DensityKernel(float dst)
 {
-	return Poly6Kernel(dst, radius);
+	return kernel::Poly6Kernel(dst, SMOOTHING_RADIUS);
 }
 
-static inline float DensityKernelScale(float radius)
+static inline float DensityKernelScale()
 {
-	return Poly6KernelScale(radius);
+	return kernel::Poly6KernelScale(SMOOTHING_RADIUS);
 }
 
-static inline float DensityKernelDerivative(float dst, float radius)
+static inline float DensityKernelDerivative(float dst)
 {
-	return SpikyKernelDerivative(dst, radius);
+	return kernel::SpikyKernelDerivative(dst, SMOOTHING_RADIUS);
 }
 
-static inline float DensityKernelDerivativeScale(float radius)
+static inline float DensityKernelDerivativeScale()
 {
-	return SpikyKernelDerivativeScale(radius);
+	return kernel::SpikyKernelDerivativeScale(SMOOTHING_RADIUS);
 }
 
-static inline float ViscosityKernel(float dst, float radius)
+static inline float ViscosityKernel(float dst)
 {
-	return SmoothingKernelPoly6(dst, radius);
+	// return kernel::Poly6Kernel(dst, SMOOTHING_RADIUS);
+	return kernel::LaplacianKernel(dst, SMOOTHING_RADIUS);
 }
 
-// template <typename F>
-// static void ForEachNeighbor(glm::vec2 position, const std::vector<glm::vec2>& positions, F&& func) {
-//     static constexpr float SQR_RADIUS = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
-
-//     for (size_t j = 0; j < PARTICLE_COUNT; ++j) {
-//         glm::vec2 offset = positions[j] - position;
-//         float sqr_dst = glm::dot(offset, offset);
-
-//         if (sqr_dst < SQR_RADIUS) {
-//             float dst = glm::sqrt(sqr_dst);
-//             std::forward<F>(func)(j, offset, dst);
-//         }
-//     }
-// }
+static inline float ViscosityKernelScale()
+{
+	// return kernel::Poly6KernelScale(SMOOTHING_RADIUS);
+	return kernel::LaplacianKernelScale(SMOOTHING_RADIUS);
+}
 
 static inline glm::vec2 RandomDir() {
     return glm::linearRand(glm::vec2(-1.0f), glm::vec2(1.0f));
-}
-
-float App::CalculateDensity(size_t index) {
-    float density = DensityKernel(0.0f, SMOOTHING_RADIUS) * MASS;
-
-    const glm::vec2 point = m_predicted_positions[index];
-
-    m_lookup.ForEachNeighbor(SMOOTHING_RADIUS, point, m_predicted_positions, [index, &density](size_t i, glm::vec2 offset, float dst) {
-        if (i != index) {
-            density += MASS * DensityKernel(dst, SMOOTHING_RADIUS);
-        }
-    });
-
-    return density * DensityKernelScale(SMOOTHING_RADIUS);
 }
 
 void App::InitParticles() {
@@ -300,47 +150,65 @@ void App::InitParticles() {
             s++;
     }
 
+    UpdateSpatialLookup(LOOKUP_RADIUS);
+
     m_pool.submit_loop(0, PARTICLE_COUNT, [this](size_t i) {
         m_densities[i] = CalculateDensity(i);
     }).wait();
 }
 
 static float ConvertDensityToPressure(float density) {
-    // density = glm::max(density, TARGET_DENSITY);
     // float ratio = density / TARGET_DENSITY;
-    // float pressure = PRESSURE_MULTIPLIER * (glm::pow(ratio, 7.0f) - 1.0f);
+    // // Tait equation: k * ((ρ/ρ₀)^γ - 1)
+    // return PRESSURE_MULTIPLIER * (glm::pow(ratio, 7.0f) - 1.0f);
 
-    float density_error = TARGET_DENSITY - density;
+    float density_error = density - TARGET_DENSITY;
     float pressure = density_error * PRESSURE_MULTIPLIER;
     return pressure;
 }
 
+float App::CalculateDensity(size_t index) {
+    ZoneScoped;
+
+    float density = DensityKernel(0.0f) * MASS;
+
+    const glm::vec2 point = m_predicted_positions[index];
+
+    m_lookup.ForEachNeighbor(LOOKUP_RADIUS, point, m_predicted_positions, [index, &density](size_t i, glm::vec2 offset, float dst) {
+        if (i == index) return;
+        density += MASS * DensityKernel(dst);
+    });
+
+    return density * DensityKernelScale();
+}
+
 glm::vec2 App::CalculatePressureForce(size_t index) {
+    ZoneScoped;
+
     glm::vec2 pressure_force = glm::vec2(0.0f);
 
     const glm::vec2 point = m_predicted_positions[index];
 
-    float density_i = m_densities[index];
+    float density_i = glm::max(m_densities[index], 0.0001f);
     float pressure_i = ConvertDensityToPressure(density_i);
 
-    m_lookup.ForEachNeighbor(SMOOTHING_RADIUS, point, m_predicted_positions, [this, index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(LOOKUP_RADIUS, point, m_predicted_positions, [this, index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
         if (j == index) return;
 
         const glm::vec2 dir = dst > glm::epsilon<float>() ? (offset / dst) : RandomDir();
 
-        const glm::vec2 slope = DensityKernelDerivative(dst, SMOOTHING_RADIUS) * dir;
+        const glm::vec2 slope = DensityKernelDerivative(dst) * dir;
 
-        const float density_j = m_densities[j];
+        const float density_j = glm::max(m_densities[j], 0.0001f);
         const float pressure_j = ConvertDensityToPressure(density_j);
 
         const float shared_pressure = (pressure_i + pressure_j) * 0.5f;
 
         // pressure_force += MASS * (pressure_i / (density_i * density_i) + pressure_j / (density_j * density_j)) * slope;
-        pressure_force -= MASS * shared_pressure * slope / density_j;
-
+        pressure_force += MASS * shared_pressure * slope / density_j;
     });
 
-    return pressure_force * DensityKernelDerivativeScale(SMOOTHING_RADIUS);
+    return pressure_force * DensityKernelDerivativeScale() / density_i;
 }
 
 glm::vec2 App::CalculateExternalForces(size_t index) {
@@ -369,17 +237,14 @@ glm::vec2 App::CalculateExternalForces(size_t index) {
 glm::vec2 App::CalculateViscosityForce(size_t index) {
     glm::vec2 viscosity_force = glm::vec2(0.0f);
 
-    const glm::vec2 point = m_positions[index];
+    const glm::vec2 point = m_predicted_positions[index];
 
-    m_lookup.ForEachNeighbor(SMOOTHING_RADIUS, point, m_positions, [this, index, &viscosity_force](size_t i, glm::vec2 offset, float dst) {
-        if (index == i) return;
-
-        float influence = ViscosityKernel(dst, SMOOTHING_RADIUS);
-        float density = m_densities[i];
-        viscosity_force += MASS * (m_velocities[i] - m_velocities[index]) * influence;
+    m_lookup.ForEachNeighbor(LOOKUP_RADIUS, point, m_predicted_positions, [this, index, &viscosity_force](size_t j, glm::vec2 offset, float dst) {
+        if (index == j) return;
+        viscosity_force += MASS * (m_velocities[j] - m_velocities[index]) * ViscosityKernel(dst) / m_densities[j];
     });
 
-    return viscosity_force * VISCOSITY_STRENGTH;
+    return viscosity_force * ViscosityKernelScale() * VISCOSITY_STRENGTH;
 }
 
 void App::ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
@@ -436,6 +301,8 @@ void App::ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
 }
 
 void App::UpdateSpatialLookup(float radius) {
+    ZoneScoped;
+
     for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
         const glm::ivec2 coord = SpatialLookup::PositionToCellCoord(m_positions[i], radius);
         size_t cell_key = m_lookup.GetKeyFromHash(SpatialLookup::HashCell(coord));
@@ -455,9 +322,23 @@ void App::UpdateSpatialLookup(float radius) {
 }
 
 void App::OnFixedUpdate() {
+    ZoneScoped;
+
     const float dt = Time::FixedDeltaSeconds();
 
     UpdateSpatialLookup(LOOKUP_RADIUS);
+
+    for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
+        m_forces[i] = glm::zero<glm::vec2>();
+    }
+
+    {
+        ZoneScopedN("CalculateDensity Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            m_predicted_positions[i] = m_positions[i] + m_velocities[i] * dt;
+            m_densities[i] = CalculateDensity(i);
+        }).wait();
+    }
 
     {
         ZoneScopedN("CalculateViscosityForce Block");
@@ -467,25 +348,16 @@ void App::OnFixedUpdate() {
     }
 
     {
+        ZoneScopedN("CalculatePressureForce Block");
+        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
+            m_forces[i] += CalculatePressureForce(i);
+        }).wait();
+    }
+
+    {
         ZoneScopedN("CalculateExternalForces Block");
         m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
             m_forces[i] += CalculateExternalForces(i);
-        }).wait();
-    }
-
-    {
-        ZoneScopedN("CalculateDensity Block");
-        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
-            const glm::vec2 acceleration = m_forces[i] / MASS * dt;
-            m_predicted_positions[i] = m_positions[i] + m_velocities[i] * dt + acceleration * dt;
-            m_densities[i] = CalculateDensity(i);
-        }).wait();
-    }
-
-    {
-        ZoneScopedN("CalculatePressureForce Block");
-        m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
-            m_forces[i] -= CalculatePressureForce(i) / m_densities[i];
         }).wait();
     }
 
@@ -499,7 +371,6 @@ void App::OnFixedUpdate() {
             ResolveCollisions(next_position, m_velocities[i]);
 
             m_positions[i] = next_position;
-            m_forces[i] = glm::zero<glm::vec2>();
         }).wait();
     }
 
@@ -563,6 +434,8 @@ void App::OnUpdate() {
 }
 
 void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
+    ZoneScoped;
+
     m_renderer->Begin();
 
     m_batch->BeginOrderMode();
