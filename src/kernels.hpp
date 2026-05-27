@@ -29,14 +29,6 @@ inline float SpikyKernelDerivative(float dst, float h) {
     return x * x;
 }
 
-inline float LaplacianKernelScale(float h) {
-    return 45.0f / (PI * glm::pow(h, 6.0f));
-}
-
-inline float LaplacianKernel(float dst, float h) {
-    return h - dst;
-}
-
 inline float SpikySmoothingKernel(float dst, float radius) {
     if (dst >= radius) {
         return 0.0f;

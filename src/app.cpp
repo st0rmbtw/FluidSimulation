@@ -15,6 +15,7 @@
 #include <SGE/time/stopwatch.hpp>
 #include <SGE/utils/gradient.hpp>
 #include <SGE/profile.hpp>
+#include <SGE/math/math.hpp>
 
 #include <glm/trigonometric.hpp>
 #include <glm/gtc/random.hpp>
@@ -46,26 +47,27 @@ static constexpr float PI = glm::pi<float>();
 // static constexpr float PUSH_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER / 10000.0f;
 // static constexpr float PULL_INTERACTION_STRENGTH = PUSH_INTERACTION_STRENGTH / 2.0f;
 
-static constexpr size_t PARTICLE_COUNT = 12000;
+static constexpr size_t PARTICLE_COUNT = 10000;
 static constexpr float PIXELS_IN_METER = 3.0f;
 static constexpr float PIXEL_TO_METER = 1.0f / PIXELS_IN_METER;
 static constexpr float METER_TO_PIXEL = PIXELS_IN_METER;
 
-static constexpr float PARTICLE_SIZE = 5.0f * PIXEL_TO_METER; // m
+static constexpr float PARTICLE_SIZE = 7.0f * PIXEL_TO_METER; // m
+static constexpr float PARTICLE_RADIUS = PARTICLE_SIZE * 0.5f; // m
 
 static constexpr float GRAVITY = 9.8f * 100.0f * PIXEL_TO_METER;
 static constexpr float TARGET_DENSITY = 1000.0f;
-static constexpr float MASS = 10.0f;
+static constexpr float MASS = 12.0f;
 
-static constexpr float SMOOTHING_RADIUS = 2.0f * PARTICLE_SIZE; // m
+static constexpr float SMOOTHING_RADIUS = 1.5f * PARTICLE_SIZE; // m
 static constexpr float COLLISION_DAMPING = 0.9f;
-static constexpr float VISCOSITY_STRENGTH = 0.1f;
+static constexpr float VISCOSITY_STRENGTH = 0.4f;
 
 static constexpr float SPEED_OF_SOUND = 15.0f; // m/s
-static constexpr float PRESSURE_MULTIPLIER = 100.0f * PIXELS_IN_METER * MASS;
+static constexpr float PRESSURE_MULTIPLIER = 1500.0f * PIXELS_IN_METER;
 
 static constexpr float INTERACTION_RADIUS = 200.0f * PIXEL_TO_METER;
-static constexpr float PULL_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 2.0f;
+static constexpr float PULL_INTERACTION_STRENGTH = PRESSURE_MULTIPLIER * 4.0f;
 static constexpr float PUSH_INTERACTION_STRENGTH = PULL_INTERACTION_STRENGTH * 2.0f;
 
 static constexpr float LOOKUP_RADIUS = 1.5f * SMOOTHING_RADIUS;
@@ -100,14 +102,12 @@ static inline float DensityKernelDerivativeScale()
 
 static inline float ViscosityKernel(float dst)
 {
-	// return kernel::Poly6Kernel(dst, SMOOTHING_RADIUS);
-	return kernel::LaplacianKernel(dst, SMOOTHING_RADIUS);
+	return kernel::Poly6Kernel(dst, SMOOTHING_RADIUS);
 }
 
 static inline float ViscosityKernelScale()
 {
-	// return kernel::Poly6KernelScale(SMOOTHING_RADIUS);
-	return kernel::LaplacianKernelScale(SMOOTHING_RADIUS);
+	return kernel::Poly6KernelScale(SMOOTHING_RADIUS);
 }
 
 static inline glm::vec2 RandomDir() {
@@ -115,6 +115,11 @@ static inline glm::vec2 RandomDir() {
 }
 
 void App::InitParticles() {
+    for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
+        m_velocities[i] = glm::vec2(0.0f);
+        m_colors[i] = GRADIENT[0].color;
+    }
+
     const float width = m_camera.viewport().width;
     const float height = m_camera.viewport().height;
 
@@ -130,7 +135,6 @@ void App::InitParticles() {
             glm::vec2 pos = glm::vec2(x, y);
             m_positions[index] = pos;
             m_predicted_positions[index] = pos;
-            m_velocities[index] = glm::vec2(0.0);
             index += 1;
 
             switch (direction) {
@@ -247,7 +251,7 @@ glm::vec2 App::CalculateViscosityForce(size_t index) {
     return viscosity_force * ViscosityKernelScale() * VISCOSITY_STRENGTH;
 }
 
-void App::ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
+void App::ResolveObstacleCollisions(glm::vec2& position, glm::vec2& velocity) {
     const float width = (m_camera.viewport().width) * PIXEL_TO_METER;
     const float height = (m_camera.viewport().height) * PIXEL_TO_METER;
 
@@ -274,29 +278,30 @@ void App::ResolveCollisions(glm::vec2& position, glm::vec2& velocity) {
     }
 
     for (const Rect& b : m_obstacles) {
-        const Rect a = Rect::from_center_size(position, glm::vec2(PARTICLE_SIZE));
+        glm::vec2 closest = glm::clamp(position, b.min, b.max);
+        glm::vec2 difference = position - closest;
 
-        // check to see if the two rectangles are intersecting
-        if (a.left() < b.right() && a.right() > b.left() && a.top() > b.bottom() && a.bottom() < b.top()) {
+        float distance_sqr = glm::dot(difference, difference);
 
-            // check to see if we hit on the left or right side
-            if (a.left() < b.left() && a.right() > b.left() && a.right() < b.right()) {
-                position.x = b.left() - half_size;
-                velocity.x = (b.left() - a.right()) * COLLISION_DAMPING;
-            } else if (a.left() > b.left() && a.left() < b.right() && a.right() > b.right()) {
-                position.x = b.right() + half_size;
-                velocity.x = (a.left() - b.right()) * COLLISION_DAMPING;
+        if (distance_sqr < PARTICLE_RADIUS*PARTICLE_RADIUS) {
+            glm::vec2 pen = PARTICLE_RADIUS - glm::abs(difference);
+            
+            float penetration;
+            glm::vec2 normal;
+
+            if (pen.x < pen.y) {
+                penetration = pen.x;
+                normal = glm::vec2(glm::sign(difference.x), 0.0f);
+            } else {
+                penetration = pen.y;
+                normal = glm::vec2(0.0f, glm::sign(difference.y));
             }
 
-            // check to see if we hit on the top or bottom side
-            if (a.bottom() < b.bottom() && a.top() > b.bottom() && a.top() < b.top()) {
-                position.y = b.bottom() - half_size;
-                velocity.y = (b.bottom() - a.top()) * COLLISION_DAMPING;
-            } else if (a.bottom() > b.bottom() && a.bottom() < b.top() && a.top() > b.top()) {
-                position.y = b.top() + half_size;
-                velocity.y = (a.bottom() - b.top()) * COLLISION_DAMPING;
-            }
-        }
+            position += normal * penetration;
+
+            float vn = glm::dot(velocity, normal);
+            velocity -= COLLISION_DAMPING * vn * normal;
+        }   
     }
 }
 
@@ -323,6 +328,9 @@ void App::UpdateSpatialLookup(float radius) {
 
 void App::OnFixedUpdate() {
     ZoneScoped;
+
+    if (m_paused)
+        return;
 
     const float dt = Time::FixedDeltaSeconds();
 
@@ -361,22 +369,23 @@ void App::OnFixedUpdate() {
         }).wait();
     }
 
+    for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
+        glm::vec2 acceleration = m_forces[i] / MASS;
+        m_velocities[i] += acceleration * dt;
+    }
+
     {
-        ZoneScopedN("Update position & velocity Block");
+        ZoneScopedN("Update position Block");
         m_pool.submit_loop(0, PARTICLE_COUNT, [this, dt](size_t i) {
-            glm::vec2 acceleration = m_forces[i] / MASS;
-            m_velocities[i] += acceleration * dt;
-
             glm::vec2 next_position = m_positions[i] + m_velocities[i] * dt;
-            ResolveCollisions(next_position, m_velocities[i]);
-
+            ResolveObstacleCollisions(next_position, m_velocities[i]);
             m_positions[i] = next_position;
         }).wait();
     }
 
     float velocity_max = 10.0f;
     for (size_t i = 0; i < PARTICLE_COUNT; ++i) {
-        const glm::vec2& v = m_velocities[i];
+        const glm::vec2 v = m_velocities[i];
         velocity_max = std::max(velocity_max, glm::dot(v, v));
     }
 
@@ -391,6 +400,10 @@ void App::OnFixedUpdate() {
 }
 
 void App::OnUpdate() {
+    if (Input::JustPressed(Key::P)) {
+        m_paused = !m_paused;
+    }
+    
     if (Input::JustPressed(Key::G)) {
         m_gravity = !m_gravity;
     }
@@ -489,7 +502,7 @@ void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
                 }
 
                 m_batch->DrawCircle(pos, {
-                    .radius = PARTICLE_SIZE / 2.0f * METER_TO_PIXEL,
+                    .radius = PARTICLE_RADIUS * METER_TO_PIXEL,
                     .color = color,
                     .anchor = Anchor::Center
                 });
@@ -500,7 +513,7 @@ void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
                 const glm::vec2 pos = m_positions[i] * METER_TO_PIXEL;
 
                 m_batch->DrawCircle(pos, {
-                    .radius = PARTICLE_SIZE / 2.0f * METER_TO_PIXEL,
+                    .radius = PARTICLE_RADIUS * METER_TO_PIXEL,
                     .color = color,
                     .anchor = Anchor::Center
                 });

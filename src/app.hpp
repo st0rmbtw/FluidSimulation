@@ -40,8 +40,6 @@ protected:
     void OnWindowResized(const std::shared_ptr<sge::GlfwWindow>& window, int width, int height) override {
         m_camera.set_viewport(sge::Size(width, height));
         m_camera.update();
-        InitParticles();
-        OnRender(window);
     }
 
     void OnWindowDestroy(sge::GlfwWindow &window) override {
@@ -58,7 +56,7 @@ private:
     glm::vec2 CalculateViscosityForce(size_t index);
     float CalculateDensity(size_t index);
 
-    void ResolveCollisions(glm::vec2& position, glm::vec2& velocity);
+    void ResolveObstacleCollisions(glm::vec2& position, glm::vec2& velocity);
 
     void UpdateSpatialLookup(float radius);
 
