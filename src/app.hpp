@@ -18,6 +18,62 @@ struct AppConfig {
     bool fullscreen = false;
 };
 
+struct SimulationConstants {
+    int ParticleCount = 10000;
+    float PixelsInMeter = 3.0f;
+
+    float ParticleSize = 7.0f * PixelToMeter(); // m
+
+    float Gravity = 9.8f * 100.0f * PixelToMeter();
+    float TargetDensity = 1000.0f;
+    float Mass = 12.0f;
+
+    float SmoothingRadius = 1.5f * ParticleSize; // m
+    float CollisionDamping = 0.9f;
+    float ViscosityStrength = 0.4f;
+
+    float SpeedOfSound = 15.0f; // m/s
+    float PressureMultiplier = 1500.0f * PixelsInMeter;
+
+    float InteractionRadius = 200.0f * PixelToMeter();
+    float PullInteractionStrength = PressureMultiplier * 4.0f;
+    float PushInteractionStrength = PullInteractionStrength * 2.0f;
+
+    float LookupRadius = 1.5f * SmoothingRadius;
+
+    float ParticleRadius() const {
+        return ParticleSize * 0.5f;
+    }
+
+    float PixelToMeter() const {
+        return 1.0f / PixelsInMeter;
+    }
+
+    float MeterToPixel() const {
+        return PixelsInMeter;
+    }
+
+    static SimulationConstants GetDefault() {
+        SimulationConstants constants;
+        constants.ParticleCount = 10000;
+        constants.PixelsInMeter = 3.0f;
+        constants.ParticleSize = 7.0f * constants.PixelToMeter();
+        constants.Gravity = 9.8f * 100.0f * constants.PixelToMeter();
+        constants.TargetDensity = 1000.0f;
+        constants.Mass = 12.0f;
+        constants.SmoothingRadius = 1.5f * constants.ParticleSize;
+        constants.CollisionDamping = 0.9f;
+        constants.ViscosityStrength = 0.4f;
+        constants.SpeedOfSound = 15.0f;
+        constants.PressureMultiplier = 1500.0f * constants.PixelsInMeter;
+        constants.InteractionRadius = 200.0f * constants.PixelToMeter();
+        constants.PullInteractionStrength = constants.PressureMultiplier * 4.0f;
+        constants.PushInteractionStrength = constants.PullInteractionStrength * 2.0f;
+        constants.LookupRadius = 1.5f * constants.SmoothingRadius;
+        return constants;
+    }
+};
+
 class App : public sge::IEngine {
 public:
     App(AppConfig config) : m_config(config) {};
@@ -27,6 +83,7 @@ protected:
     void OnFixedUpdate() override;
     void OnUpdate() override;
     void OnRender(const std::shared_ptr<sge::GlfwWindow>& window) override;
+    void OnInputEvent(const sge::InputEvent &event) override;
 
 #if SGE_DEBUG
     void OnPostRender(const std::shared_ptr<sge::GlfwWindow>& window) override {
@@ -60,9 +117,13 @@ private:
 
     void UpdateSpatialLookup(float radius);
 
+    void CreateSceneTarget(LLGL::Extent2D resolution);
+
 private:
     sge::Camera m_camera = sge::Camera(sge::CameraConfig { .origin = sge::CameraOrigin::TopLeft });
+    sge::Camera m_simulation_camera = sge::Camera(sge::CameraConfig { .origin = sge::CameraOrigin::TopLeft });
     BS::thread_pool<> m_pool;
+    SimulationConstants m_constants = SimulationConstants::GetDefault();
     SpatialLookup m_lookup;
     std::vector<glm::vec2> m_positions;
     std::vector<glm::vec2> m_predicted_positions;
@@ -74,12 +135,22 @@ private:
     sge::Rect m_selection_rect;
     std::unique_ptr<sge::Batch> m_batch;
     std::unique_ptr<sge::Renderer> m_renderer;
+
+    sge::Handle<LLGL::RenderTarget> m_render_target;
+    sge::Texture m_target_texture;
+    LLGL::Extent2D m_target_resolution;
+
     float m_interaction_strength = 0.0f;
     AppConfig m_config;
+    bool m_initialized = false;
     bool m_paused = false;
     bool m_gravity = false;
     bool m_selection = false;
     bool m_show_debug_info = false;
+#if SGE_IMGUI_ENABLED
+    bool m_simulation_view_focused = false;
+    bool m_simulation_view_hovered = false;
+#endif
     uint32_t m_primary_window_id = 0;
 };
 
