@@ -1,21 +1,23 @@
 #include "app.hpp"
+#include "i18n.hpp"
 #include "spatial_lookup.hpp"
 #include "kernels.hpp"
 
+#include <SGE/assert.hpp>
 #include <SGE/engine.hpp>
-#include <SGE/renderer/renderer.hpp>
-#include <SGE/renderer/camera.hpp>
 #include <SGE/input.hpp>
+#include <SGE/log.hpp>
+#include <SGE/math/math.hpp>
+#include <SGE/profile.hpp>
+#include <SGE/renderer/camera.hpp>
+#include <SGE/renderer/renderer.hpp>
+#include <SGE/time/stopwatch.hpp>
 #include <SGE/time/time.hpp>
 #include <SGE/types/anchor.hpp>
+#include <SGE/types/blend_mode.hpp>
 #include <SGE/types/color.hpp>
 #include <SGE/types/window_settings.hpp>
-#include <SGE/types/blend_mode.hpp>
-#include <SGE/log.hpp>
-#include <SGE/time/stopwatch.hpp>
 #include <SGE/utils/gradient.hpp>
-#include <SGE/profile.hpp>
-#include <SGE/math/math.hpp>
 #include <SGE/utils/string.hpp>
 
 #include <glm/trigonometric.hpp>
@@ -24,6 +26,10 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+
+#include "json.hpp"
+
+using json = nlohmann::json;
 
 using namespace sge;
 
@@ -133,7 +139,7 @@ void App::InitParticles() {
             s++;
     }
 
-    UpdateSpatialLookup(m_constants.LookupRadius);
+    UpdateSpatialLookup(m_constants.LookupRadius());
 
     m_pool.submit_loop(0, m_constants.ParticleCount, [this](size_t i) {
         m_densities[i] = CalculateDensity(i);
@@ -159,7 +165,7 @@ float App::CalculateDensity(size_t index) {
 
     const glm::vec2 point = m_predicted_positions[index];
 
-    m_lookup.ForEachNeighbor(m_constants.LookupRadius, point, m_predicted_positions, [this, index, &density](size_t i, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(m_constants.LookupRadius(), point, m_predicted_positions, [this, index, &density](size_t i, glm::vec2 offset, float dst) {
         if (i == index) return;
         density += m_constants.Mass * DensityKernel(dst, m_constants.SmoothingRadius);
     });
@@ -177,7 +183,7 @@ glm::vec2 App::CalculatePressureForce(size_t index) {
     float density_i = glm::max(m_densities[index], 0.0001f);
     float pressure_i = ConvertDensityToPressure(density_i, m_constants.TargetDensity, m_constants.PressureMultiplier);
 
-    m_lookup.ForEachNeighbor(m_constants.LookupRadius, point, m_predicted_positions, [this, index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(m_constants.LookupRadius(), point, m_predicted_positions, [this, index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
         if (j == index) return;
 
         const glm::vec2 dir = dst > glm::epsilon<float>() ? (offset / dst) : RandomDir();
@@ -224,7 +230,7 @@ glm::vec2 App::CalculateViscosityForce(size_t index) {
 
     const glm::vec2 point = m_predicted_positions[index];
 
-    m_lookup.ForEachNeighbor(m_constants.LookupRadius, point, m_predicted_positions, [this, index, &viscosity_force](size_t j, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(m_constants.LookupRadius(), point, m_predicted_positions, [this, index, &viscosity_force](size_t j, glm::vec2 offset, float dst) {
         if (index == j) return;
         viscosity_force += m_constants.Mass * (m_velocities[j] - m_velocities[index]) * ViscosityKernel(dst, m_constants.SmoothingRadius) / m_densities[j];
     });
@@ -321,7 +327,7 @@ void App::OnFixedUpdate() {
 
     const float dt = Time::FixedDeltaSeconds();
 
-    UpdateSpatialLookup(m_constants.LookupRadius);
+    UpdateSpatialLookup(m_constants.LookupRadius());
 
     for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
         m_forces[i] = glm::zero<glm::vec2>();
@@ -437,14 +443,14 @@ void App::OnInputEvent(const InputEvent& event) {
 #if SGE_IMGUI_ENABLED
     if (!m_simulation_view_focused)
         return;
-    if (!m_simulation_view_hovered && event.Type == sge::InputEventType::MouseButton)
+    if (!m_simulation_view_hovered && event.Type == InputEventType::MouseButton)
         return;
 #endif
     Input::ProcessEvent(event);
 }
 
 void App::CreateSceneTarget(LLGL::Extent2D resolution) {
-    sge::TextureConfig textureConfig;
+    TextureConfig textureConfig;
     textureConfig.textureType = LLGL::TextureType::Texture2D;
     textureConfig.extent.width = resolution.width;
     textureConfig.extent.height = resolution.height;
@@ -452,18 +458,18 @@ void App::CreateSceneTarget(LLGL::Extent2D resolution) {
 
     m_target_texture = GetRenderContext()->CreateTexture(textureConfig);
 
-    sge::RenderTargetConfig targetConfig;
+    RenderTargetConfig targetConfig;
     targetConfig.resolution.width = resolution.width;
     targetConfig.resolution.height = resolution.height;
     targetConfig.format = LLGL::Format::RGBA8UNorm;
 
-    targetConfig.colorAttachments[0] = sge::AttachmentConfig(m_target_texture.internal());
+    targetConfig.colorAttachments[0] = AttachmentConfig(m_target_texture.internal());
 
     m_render_target = GetRenderContext()->CreateRenderTarget(targetConfig);
     m_target_resolution = resolution;
 }
 
-void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
+void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     ZoneScoped;
 
     LLGL::RenderTarget& simulationTarget = GetRenderContext()->GetOrCreateRenderTarget(m_render_target, 4);
@@ -497,50 +503,52 @@ void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
             });
         }
 
-        if (m_show_debug_info) {
-            m_batch->DrawCircle(Input::CursorPosition(), {
-                .radius = m_constants.LookupRadius * 2.0f * m_constants.MeterToPixel(),
-                .color = LinearRgba::transparent(),
-                .border_thickness = 1.0f,
-                .border_color = LinearRgba(73, 214, 153),
-            });
+        if (m_initialized) {
+            if (m_show_debug_info) {
+                m_batch->DrawCircle(Input::CursorPosition(), {
+                    .radius = m_constants.LookupRadius() * m_constants.MeterToPixel(),
+                    .color = LinearRgba::transparent(),
+                    .border_thickness = 1.0f,
+                    .border_color = LinearRgba(73, 214, 153),
+                });
 
-            const glm::ivec2 center = SpatialLookup::PositionToCellCoord(Input::CursorPosition() * m_constants.PixelToMeter(), m_constants.LookupRadius);
+                const glm::ivec2 center = SpatialLookup::PositionToCellCoord(Input::CursorPosition() * m_constants.PixelToMeter(), m_constants.LookupRadius());
 
-            size_t keys[9] = {};
-            for (size_t i = 0; i < 9; ++i) {
-                keys[i] = m_lookup.GetKeyFromHash(SpatialLookup::HashCell(center + SpatialLookup::CELL_OFFSETS[i]));
-            }
-
-            for (size_t i = 0; i < m_lookup.GetSize(); ++i) {
-                const size_t index = m_lookup.GetCell(i).index;
-
-                LinearRgba color = m_colors[index];
-                const glm::vec2 pos = m_positions[index] * m_constants.MeterToPixel();
-
-                for (size_t j = 0; j < 9; ++j) {
-                    if (m_lookup.GetCell(i).key == keys[j]) {
-                        color = LinearRgba::red();
-                        break;
-                    }
+                size_t keys[9] = {};
+                for (size_t i = 0; i < 9; ++i) {
+                    keys[i] = m_lookup.GetKeyFromHash(SpatialLookup::HashCell(center + SpatialLookup::CELL_OFFSETS[i]));
                 }
 
-                m_batch->DrawCircle(pos, {
-                    .radius = m_constants.ParticleRadius() * m_constants.MeterToPixel(),
-                    .color = color,
-                    .anchor = Anchor::Center
-                });
-            }
-        } else {
-            for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
-                const LinearRgba& color = m_colors[i];
-                const glm::vec2 pos = m_positions[i] * m_constants.MeterToPixel();
+                for (size_t i = 0; i < m_lookup.GetSize(); ++i) {
+                    const size_t index = m_lookup.GetCell(i).index;
 
-                m_batch->DrawCircle(pos, {
-                    .radius = m_constants.ParticleRadius() * m_constants.MeterToPixel(),
-                    .color = color,
-                    .anchor = Anchor::Center
-                });
+                    LinearRgba color = m_colors[index];
+                    const glm::vec2 pos = m_positions[index] * m_constants.MeterToPixel();
+
+                    for (size_t j = 0; j < 9; ++j) {
+                        if (m_lookup.GetCell(i).key == keys[j]) {
+                            color = LinearRgba::red();
+                            break;
+                        }
+                    }
+
+                    m_batch->DrawCircle(pos, {
+                        .radius = m_constants.ParticleRadius() * m_constants.MeterToPixel(),
+                        .color = color,
+                        .anchor = Anchor::Center
+                    });
+                }
+            } else {
+                for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
+                    const LinearRgba& color = m_colors[i];
+                    const glm::vec2 pos = m_positions[i] * m_constants.MeterToPixel();
+
+                    m_batch->DrawCircle(pos, {
+                        .radius = m_constants.ParticleRadius() * m_constants.MeterToPixel(),
+                        .color = color,
+                        .anchor = Anchor::Center
+                    });
+                }
             }
         }
     }
@@ -631,16 +639,28 @@ void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
                     
                     ImGui::Begin("Settings");
                     {
-                        if (ImGui::CollapsingHeader("Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
-                            if (ImGui::Button("Reset", ImVec2(-FLT_MIN, 0.0f))) {
-                                InitParticles();
+                        static int current_language = 0;
+                        const char* options[] = { "English", "Русский" };
+                        if (ImGui::Combo(m_language.Language.c_str(), &current_language, options, IM_ARRAYSIZE(options))) {
+                            if (current_language == 0) {
+                                m_language = i18n::GetDefault();
+                            } else if (current_language == 1) {
+                                m_language = i18n::LoadLanguage("./assets/langs/Russian.json");
+                            } else {
+                                SGE_UNREACHABLE();
                             }
-                            ImGui::Checkbox("Enable Gravity", &m_gravity);
-                            ImGui::Checkbox("Paused", &m_paused);
                         }
 
-                        if (ImGui::CollapsingHeader("Constants", ImGuiTreeNodeFlags_DefaultOpen)) {
-                            if (ImGui::DragInt("Particle Count", &m_constants.ParticleCount, 50.0f, 0, INT_MAX)) {
+                        if (ImGui::CollapsingHeader(m_language.Controls.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                            if (ImGui::Button(m_language.Reset.c_str(), ImVec2(-FLT_MIN, 0.0f))) {
+                                InitParticles();
+                            }
+                            ImGui::Checkbox(m_language.Gravity.c_str(), &m_gravity);
+                            ImGui::Checkbox(m_language.Paused.c_str(), &m_paused);
+                        }
+
+                        if (ImGui::CollapsingHeader(m_language.Constants.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                            if (ImGui::DragInt(m_language.ParticleCount.c_str(), &m_constants.ParticleCount, 50.0f, 0, INT_MAX)) {
                                 if (m_constants.ParticleCount > 0) {
                                     m_positions.resize(m_constants.ParticleCount);
                                     m_predicted_positions.resize(m_constants.ParticleCount);
@@ -652,30 +672,30 @@ void App::OnRender(const std::shared_ptr<sge::GlfwWindow>& window) {
                                 }
                                 InitParticles();
                             }
-                            ImGui::DragFloat("Pixels In Meter", &m_constants.PixelsInMeter, 0.01f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Particle Size", &m_constants.ParticleSize, 0.001f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Gravity", &m_constants.Gravity, 5.0f);
-                            ImGui::DragFloat("Mass", &m_constants.Mass, 1.0f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Target Density", &m_constants.TargetDensity, 0.05f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Viscosity Strength", &m_constants.ViscosityStrength, 0.01f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Smoothing Radius", &m_constants.SmoothingRadius, 0.01f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Pressure Multiplier", &m_constants.PressureMultiplier, 10.0f, 0.0f, FLT_MAX);
-                            ImGui::DragFloat("Collision Damping", &m_constants.CollisionDamping, 0.01f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.PixelsInMeter.c_str(), &m_constants.PixelsInMeter, 0.01f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.ParticleSize.c_str(), &m_constants.ParticleSize, 0.001f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.GravityStrength.c_str(), &m_constants.Gravity, 5.0f);
+                            ImGui::DragFloat(m_language.Mass.c_str(), &m_constants.Mass, 1.0f, 1.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.TargetDensity.c_str(), &m_constants.TargetDensity, 0.05f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.ViscosityStrength.c_str(), &m_constants.ViscosityStrength, 0.01f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.SmoothingRadius.c_str(), &m_constants.SmoothingRadius, 0.01f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.PressureMultiplier.c_str(), &m_constants.PressureMultiplier, 10.0f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat(m_language.CollisionDamping.c_str(), &m_constants.CollisionDamping, 0.01f, 0.0f, FLT_MAX);
 
-                            ImGui::SeparatorText("Interaction");
+                            ImGui::SeparatorText(m_language.Interaction.c_str());
 
-                            ImGui::DragFloat("Interaction Radius", &m_constants.InteractionRadius, 0.1f);
-                            ImGui::DragFloat("Pull Strength", &m_constants.PullInteractionStrength, 10.0f);
-                            ImGui::DragFloat("Push Strength", &m_constants.PushInteractionStrength, 10.0f);
+                            ImGui::DragFloat(m_language.InteractionRadius.c_str(), &m_constants.InteractionRadius, 0.1f);
+                            ImGui::DragFloat(m_language.InteractionPullStrength.c_str(), &m_constants.PullInteractionStrength, 10.0f);
+                            ImGui::DragFloat(m_language.InteractionPushStrength.c_str(), &m_constants.PushInteractionStrength, 10.0f);
 
-                            if (ImGui::Button("Reset To Default", ImVec2(-FLT_MIN, 0.0f))) {
+                            if (ImGui::Button(m_language.ResetToDefault.c_str(), ImVec2(-FLT_MIN, 0.0f))) {
                                 m_constants = SimulationConstants::GetDefault();
                                 InitParticles();
                             }
                         }
 
-                        if (ImGui::CollapsingHeader("Statistics")) {
-                            ImGui::Text("Frame Time: %f (%.0f FPS)", sge::Time::DeltaSeconds(), 1.0f / sge::Time::DeltaSeconds());
+                        if (ImGui::CollapsingHeader(m_language.Statistics.c_str())) {
+                            ImGui::Text("%s: %.3f %s (%.0f FPS)", m_language.FrameTime.c_str(), Duration::GetAs<float, std::milli>(Time::Delta()), m_language.MsPerFrame.c_str(), 1.0f / Time::DeltaSeconds());
                         }
                     }
                     ImGui::End();
@@ -719,7 +739,7 @@ bool App::OnInit() {
         return false;
     }
 
-    std::shared_ptr<sge::GlfwWindow> window = result.value();
+    std::shared_ptr<GlfwWindow> window = result.value();
     m_primary_window_id = window->GetID();
 
     m_renderer = std::make_unique<Renderer>(GetRenderContext());
@@ -745,6 +765,16 @@ bool App::OnInit() {
     m_simulation_camera.update();
 
     window->ShowWindow();
+    
+#if SGE_IMGUI_ENABLED
+    ImGuiIO& io = ImGui::GetIO(GetRenderContext()->GetOrCreateImGuiContext(*window));
+    io.FontDefault = io.Fonts->AddFontFromFileTTF(
+        "./assets/fonts/Inter.ttf",
+        16.0f,
+        nullptr,
+        io.Fonts->GetGlyphRangesCyrillic()
+    );
+#endif
 
     return true;
 }

@@ -1,6 +1,7 @@
 #ifndef APP_HPP
 #define APP_HPP
 
+#include "i18n.hpp"
 #pragma once
 
 #include <SGE/types/backend.hpp>
@@ -39,8 +40,6 @@ struct SimulationConstants {
     float PullInteractionStrength = PressureMultiplier * 4.0f;
     float PushInteractionStrength = PullInteractionStrength * 2.0f;
 
-    float LookupRadius = 1.5f * SmoothingRadius;
-
     float ParticleRadius() const {
         return ParticleSize * 0.5f;
     }
@@ -51,6 +50,10 @@ struct SimulationConstants {
 
     float MeterToPixel() const {
         return PixelsInMeter;
+    }
+
+    float LookupRadius() const {
+        return 1.5f * SmoothingRadius;
     }
 
     static SimulationConstants GetDefault() {
@@ -69,7 +72,6 @@ struct SimulationConstants {
         constants.InteractionRadius = 200.0f * constants.PixelToMeter();
         constants.PullInteractionStrength = constants.PressureMultiplier * 4.0f;
         constants.PushInteractionStrength = constants.PullInteractionStrength * 2.0f;
-        constants.LookupRadius = 1.5f * constants.SmoothingRadius;
         return constants;
     }
 };
@@ -120,6 +122,7 @@ private:
     void CreateSceneTarget(LLGL::Extent2D resolution);
 
 private:
+    i18n::Language m_language = i18n::GetDefault();
     sge::Camera m_camera = sge::Camera(sge::CameraConfig { .origin = sge::CameraOrigin::TopLeft });
     sge::Camera m_simulation_camera = sge::Camera(sge::CameraConfig { .origin = sge::CameraOrigin::TopLeft });
     BS::thread_pool<> m_pool;
