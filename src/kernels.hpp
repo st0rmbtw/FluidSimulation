@@ -29,12 +29,10 @@ inline float SpikyKernelDerivative(float dst, float h) {
     return x * x;
 }
 
-inline float SpikySmoothingKernel(float dst, float radius) {
-    if (dst >= radius) {
-        return 0.0f;
-    }
-    const float volume = PI * glm::pow(radius, 6.0f) / 15.0f;
-    const float v = (radius - dst);
+inline float SpikySmoothingKernel(float dst, float h) {
+    if (dst >= h) return 0.0f;
+    const float volume = PI * glm::pow(h, 6.0f) / 15.0f;
+    const float v = (h - dst);
     return v * v * v / volume;
 }
 

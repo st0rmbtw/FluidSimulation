@@ -180,17 +180,18 @@ glm::vec2 App::CalculatePressureForce(size_t index) {
 
     const glm::vec2 point = m_predicted_positions[index];
 
-    float density_i = glm::max(m_densities[index], 0.0001f);
+    float density_i = glm::max(m_densities[index], 1e-6f);
     float pressure_i = ConvertDensityToPressure(density_i, m_constants.TargetDensity, m_constants.PressureMultiplier);
 
     m_lookup.ForEachNeighbor(m_constants.LookupRadius(), point, m_predicted_positions, [this, index, density_i, pressure_i, &pressure_force](size_t j, glm::vec2 offset, float dst) {
         if (j == index) return;
+        if (dst <= 0.0f) return;
 
-        const glm::vec2 dir = dst > glm::epsilon<float>() ? (offset / dst) : RandomDir();
+        const glm::vec2 dir = offset / dst;
 
         const glm::vec2 slope = DensityKernelDerivative(dst, m_constants.SmoothingRadius) * dir;
 
-        const float density_j = glm::max(m_densities[j], 0.0001f);
+        const float density_j = glm::max(m_densities[j], 1e-6f);
         const float pressure_j = ConvertDensityToPressure(density_j, m_constants.TargetDensity, m_constants.PressureMultiplier);
 
         const float shared_pressure = (pressure_i + pressure_j) * 0.5f;
@@ -229,10 +230,11 @@ glm::vec2 App::CalculateViscosityForce(size_t index) {
     glm::vec2 viscosity_force = glm::vec2(0.0f);
 
     const glm::vec2 point = m_predicted_positions[index];
+    const glm::vec2 velocity = m_velocities[index];
 
-    m_lookup.ForEachNeighbor(m_constants.LookupRadius(), point, m_predicted_positions, [this, index, &viscosity_force](size_t j, glm::vec2 offset, float dst) {
+    m_lookup.ForEachNeighbor(m_constants.LookupRadius(), point, m_predicted_positions, [this, velocity, index, &viscosity_force](size_t j, glm::vec2 offset, float dst) {
         if (index == j) return;
-        viscosity_force += m_constants.Mass * (m_velocities[j] - m_velocities[index]) * ViscosityKernel(dst, m_constants.SmoothingRadius) / m_densities[j];
+        viscosity_force += m_constants.Mass * (m_velocities[j] - velocity) * ViscosityKernel(dst, m_constants.SmoothingRadius);
     });
 
     return viscosity_force * ViscosityKernelScale(m_constants.SmoothingRadius) * m_constants.ViscosityStrength;
@@ -306,7 +308,7 @@ void App::UpdateSpatialLookup(float radius) {
 
     for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
         size_t key = m_lookup.GetCell(i).key;
-        size_t prev_key = i == 0 ? SIZE_MAX : m_lookup.GetCell(i - 1).key;
+        size_t prev_key = (i == 0) ? SIZE_MAX : m_lookup.GetCell(i - 1).key;
         if (key != prev_key) {
             m_lookup.SetStartIndex(key, i);
         }
@@ -364,6 +366,15 @@ void App::OnFixedUpdate() {
 
     for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
         glm::vec2 acceleration = m_forces[i] / m_constants.Mass;
+
+        // const float a2 = glm::dot(acceleration, acceleration);
+        // const float max_accel = m_constants.MaxAcceleration;
+        // if (a2 > max_accel * max_accel) {
+        //     const float f_len = glm::sqrt(a2);
+        //     acceleration.x = acceleration.x * (max_accel / f_len);
+        //     acceleration.y = acceleration.y * (max_accel / f_len);
+        // }
+
         m_velocities[i] += acceleration * dt;
     }
 
@@ -376,6 +387,72 @@ void App::OnFixedUpdate() {
         }).wait();
     }
 
+    if (m_collision) {
+        ZoneScopedN("Resolve Collisions Block")
+        const float step = m_constants.LookupRadius() * 2.0f;
+
+        const float viewport_width = m_simulation_camera.viewport().width;
+        const float viewport_height = m_simulation_camera.viewport().height;
+
+        const int cols = std::ceil(viewport_width / step);
+        const int rows = std::ceil(viewport_height / step);
+
+        for (int x = 0; x < cols; ++x) {
+            for (int y = 0; y < rows; ++y) {
+                size_t key = m_lookup.GetKeyFromHash(SpatialLookup::HashCell({x, y}));
+                size_t start_index = m_lookup.GetStartIndex(key);
+                if (start_index == SIZE_MAX) continue;
+
+                for (size_t i = start_index; i < m_lookup.GetSize(); ++i) {
+                    SpatialLookup::Cell i_cell = m_lookup.GetCell(i);
+                    if (i_cell.key != key) break;
+
+                    glm::vec2& v1 = m_velocities[i_cell.index];
+                    glm::vec2& p1 = m_positions[i_cell.index];
+
+                    for (size_t j = i + 1; j < m_lookup.GetSize(); ++j) {
+                        SpatialLookup::Cell j_cell = m_lookup.GetCell(j);
+                        if (j_cell.key != key) break;
+                        if (i_cell.index == j_cell.index) continue;
+
+                        glm::vec2& v2 = m_velocities[j_cell.index];
+                        glm::vec2& p2 = m_positions[j_cell.index];
+
+                        glm::vec2 d = p2 - p1;
+                        float distance_sq = glm::dot(d, d);
+                        float radii_sum = m_constants.ParticleRadius() + m_constants.ParticleRadius();
+
+                        if (distance_sq >= radii_sum * radii_sum)
+                            continue;
+
+                        float distance = glm::sqrt(distance_sq);
+
+                        if (distance < 1e-6f) {
+                            distance = 1e-6f;
+                            d.x = radii_sum;
+                        }
+
+                        float overlap = radii_sum - distance;
+
+                        glm::vec2 n = d / distance;
+                        
+                        p1 -= n * overlap * 0.55f;
+                        p2 += n * overlap * 0.55f;
+
+                        glm::vec2 rv = v2 - v1;
+                        float vel_n = glm::dot(rv, n);
+                        if (vel_n >= 0.0f) continue;
+
+                        float impulseScalar = -(1.0f + m_collision_restitution) * vel_n;
+
+                        v1 -= impulseScalar * n;
+                        v2 += impulseScalar * n;
+                    }
+                }
+            }
+        }
+    }
+
     float velocity_max = 10.0f;
     for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
         const glm::vec2 v = m_velocities[i];
@@ -384,7 +461,7 @@ void App::OnFixedUpdate() {
 
     {
         ZoneScopedN("GradientEvaluation Block");
-        m_pool.submit_loop(0, m_constants.ParticleCount, [this, dt, velocity_max](size_t i) {
+        m_pool.submit_loop(0, m_constants.ParticleCount, [this, velocity_max](size_t i) {
             const glm::vec2 v = m_velocities[i];
             float t = glm::dot(v, v) / velocity_max;
             m_colors[i] = GradientEvaluate(GRADIENT, t);
@@ -450,6 +527,8 @@ void App::OnInputEvent(const InputEvent& event) {
 }
 
 void App::CreateSceneTarget(LLGL::Extent2D resolution) {
+    GetRenderContext()->DeleteRenderTarget(m_render_target);
+
     TextureConfig textureConfig;
     textureConfig.textureType = LLGL::TextureType::Texture2D;
     textureConfig.extent.width = resolution.width;
@@ -462,7 +541,6 @@ void App::CreateSceneTarget(LLGL::Extent2D resolution) {
     targetConfig.resolution.width = resolution.width;
     targetConfig.resolution.height = resolution.height;
     targetConfig.format = LLGL::Format::RGBA8UNorm;
-
     targetConfig.colorAttachments[0] = AttachmentConfig(m_target_texture.internal());
 
     m_render_target = GetRenderContext()->CreateRenderTarget(targetConfig);
@@ -473,11 +551,6 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     ZoneScoped;
 
     LLGL::RenderTarget& simulationTarget = GetRenderContext()->GetOrCreateRenderTarget(m_render_target, 4);
-    if (m_target_resolution != simulationTarget.GetResolution()) {
-        CreateSceneTarget(m_target_resolution);
-        m_simulation_camera.set_viewport(m_target_resolution);
-        m_simulation_camera.update();
-    }
 
     m_renderer->Begin();
 
@@ -501,6 +574,26 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
                 .border_color = LinearRgba(73, 214, 153),
                 .anchor = Anchor::TopLeft
             });
+        }
+
+        if (m_show_grid) {
+            const float step = m_constants.SmoothingRadius * 2.0f;
+
+            const float viewport_width = m_simulation_camera.viewport().width;
+            const float viewport_height = m_simulation_camera.viewport().height;
+
+            const int cols = std::ceil(viewport_width / step);
+            const int rows = std::ceil(viewport_height / step);
+
+            for (int i = 0; i < cols; ++i) {
+                const float x = i * step;
+                m_batch->DrawLine(glm::vec2(x, 0.0f), glm::vec2(x, viewport_height), 1.0f, sge::LinearRgba(0.2f, 1.0f));
+
+                for (int j = 0; j < rows; ++j) {
+                    const float y = j * step;
+                    m_batch->DrawLine(glm::vec2(0.0f, y), glm::vec2(viewport_width, y), 1.0f, sge::LinearRgba(0.2f, 1.0f));
+                }
+            }
         }
 
         if (m_initialized) {
@@ -681,6 +774,7 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
                             ImGui::DragFloat(m_language.SmoothingRadius.c_str(), &m_constants.SmoothingRadius, 0.01f, 0.0f, FLT_MAX);
                             ImGui::DragFloat(m_language.PressureMultiplier.c_str(), &m_constants.PressureMultiplier, 10.0f, 0.0f, FLT_MAX);
                             ImGui::DragFloat(m_language.CollisionDamping.c_str(), &m_constants.CollisionDamping, 0.01f, 0.0f, FLT_MAX);
+                            ImGui::DragFloat("Max Acceleration", &m_constants.MaxAcceleration, 1.0f, 0.0f, FLT_MAX);
 
                             ImGui::SeparatorText(m_language.Interaction.c_str());
 
@@ -692,6 +786,15 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
                                 m_constants = SimulationConstants::GetDefault();
                                 InitParticles();
                             }
+                        }
+
+                        if (ImGui::CollapsingHeader("Collisions")) {
+                            ImGui::Checkbox("Enabled", &m_collision);
+                            ImGui::DragFloat("Restitution", &m_collision_restitution, 0.01f, 0.0f, 1.0f);
+                        }
+
+                        if (ImGui::CollapsingHeader("Debug")) {
+                            ImGui::Checkbox("Show Grid", &m_show_grid);
                         }
 
                         if (ImGui::CollapsingHeader(m_language.Statistics.c_str())) {
@@ -709,6 +812,12 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     m_renderer->EndPass();
 
     m_renderer->End();
+
+    if (m_target_resolution != simulationTarget.GetResolution()) {
+        CreateSceneTarget(m_target_resolution);
+        m_simulation_camera.set_viewport(m_target_resolution);
+        m_simulation_camera.update();
+    }
 }
 
 bool App::OnInit() {

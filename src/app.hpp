@@ -40,6 +40,8 @@ struct SimulationConstants {
     float PullInteractionStrength = PressureMultiplier * 4.0f;
     float PushInteractionStrength = PullInteractionStrength * 2.0f;
 
+    float MaxAcceleration = 200.0f;
+
     float ParticleRadius() const {
         return ParticleSize * 0.5f;
     }
@@ -144,12 +146,16 @@ private:
     LLGL::Extent2D m_target_resolution;
 
     float m_interaction_strength = 0.0f;
+    float m_collision_restitution = 0.0f;
     AppConfig m_config;
+
     bool m_initialized = false;
     bool m_paused = false;
     bool m_gravity = false;
     bool m_selection = false;
     bool m_show_debug_info = false;
+    bool m_show_grid = false;
+    bool m_collision = true;
 #if SGE_IMGUI_ENABLED
     bool m_simulation_view_focused = false;
     bool m_simulation_view_hovered = false;
