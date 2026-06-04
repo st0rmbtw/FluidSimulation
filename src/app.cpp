@@ -552,6 +552,7 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
 
     LLGL::RenderTarget& simulationTarget = GetRenderContext()->GetOrCreateRenderTarget(m_render_target, 4);
 
+    m_batch->Reset();
     m_renderer->Begin();
 
     m_batch->BeginOrderMode();
@@ -647,12 +648,11 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     }
     m_batch->EndOrderMode();
 
+    m_renderer->PrepareBatch(*m_batch);
+
     m_renderer->BeginPass(simulationTarget, m_simulation_camera);
         m_renderer->Clear(LLGL::ClearValue(0.0f, 0.0f, 0.0f, 1.0f));
-        m_renderer->PrepareBatch(*m_batch);
-        m_renderer->UploadBatchData();
         m_renderer->RenderBatch(*m_batch);
-        m_batch->Reset();
     m_renderer->EndPass();
 
     m_renderer->BeginPass(window, m_camera);

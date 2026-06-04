@@ -92,8 +92,9 @@ protected:
 #if SGE_DEBUG
     void OnPostRender(const std::shared_ptr<sge::GlfwWindow>& window) override {
         if (sge::Input::Pressed(sge::Key::C)) {
-            LLGL::FrameProfile profile = GetRenderContext()->GetDebugInfo();
-            SGE_LOG_INFO("Draw count");
+            LLGL::FrameProfile profile;
+            GetRenderContext()->GetDebugInfo(&profile);
+            SGE_LOG_INFO("Draw count: {}", profile.commandBufferRecord.drawCommands);
         }
     }
 #endif
