@@ -113,6 +113,8 @@ protected:
 private:
     void InitParticles();
 
+    void SimulationStep(float dt);
+
     glm::vec2 CalculatePressureForce(size_t index);
     glm::vec2 CalculateExternalForces(size_t index);
     glm::vec2 CalculateViscosityForce(size_t index);

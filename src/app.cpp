@@ -13,6 +13,7 @@
 #include <SGE/renderer/renderer.hpp>
 #include <SGE/time/stopwatch.hpp>
 #include <SGE/time/time.hpp>
+#include <SGE/time/timer.hpp>
 #include <SGE/types/anchor.hpp>
 #include <SGE/types/blend_mode.hpp>
 #include <SGE/types/color.hpp>
@@ -105,38 +106,26 @@ void App::InitParticles() {
         m_colors[i] = GRADIENT[0].color;
     }
 
-    const float width = m_simulation_camera.viewport().width;
-    const float height = m_simulation_camera.viewport().height;
+    // Place particles in square
+    const float width = m_simulation_camera.viewport().width * m_constants.PixelToMeter();
+    const float height = m_simulation_camera.viewport().height * m_constants.PixelToMeter();
+    
+    // Square side size
+    const int a = std::ceil(std::sqrt(m_constants.ParticleCount));
 
-    float x = (width / 2.0f) * m_constants.PixelToMeter();
-    float y = (height / 2.0f) * m_constants.PixelToMeter();
+    float y = (height - (a * m_constants.ParticleSize)) * 0.5f;
+    for (size_t i = 0; i < a; ++i) {
+        float x = (width - (a * m_constants.ParticleSize)) * 0.5f;
 
-    // Spawn in spiral order
-    int s = 1;
-    int direction = 0;
-    int index = 0;
-    while (index < m_constants.ParticleCount) {
-        for (int i = 0; i < glm::min(m_constants.ParticleCount, index+s)-index; ++i) {
+        for (size_t j = 0; j < a; ++j) {
+            size_t index = i * a + j;
+
             glm::vec2 pos = glm::vec2(x, y);
             m_positions[index] = pos;
             m_predicted_positions[index] = pos;
-            index += 1;
-
-            switch (direction) {
-                case 0: x += m_constants.ParticleSize;
-                break;
-                case 1: y += m_constants.ParticleSize;
-                break;
-                case 2: x -= m_constants.ParticleSize;
-                break;
-                case 3: y -= m_constants.ParticleSize;
-                break;
-            }
+            x += m_constants.ParticleSize;
         }
-
-        direction = (direction + 1) % 4;
-        if (direction % 2 == 0)
-            s++;
+        y += m_constants.ParticleSize;
     }
 
     UpdateSpatialLookup(m_constants.LookupRadius());
@@ -315,20 +304,7 @@ void App::UpdateSpatialLookup(float radius) {
     };
 }
 
-void App::OnFixedUpdate() {
-    ZoneScoped;
-
-    if (m_paused)
-        return;
-
-    if (m_constants.ParticleCount <= 0)
-        return;
-
-    if (!m_initialized)
-        return;
-
-    const float dt = Time::FixedDeltaSeconds();
-
+void App::SimulationStep(float dt) {
     UpdateSpatialLookup(m_constants.LookupRadius());
 
     for (size_t i = 0; i < m_constants.ParticleCount; ++i) {
@@ -425,16 +401,11 @@ void App::OnFixedUpdate() {
                         if (distance_sq >= radii_sum * radii_sum)
                             continue;
 
-                        float distance = glm::sqrt(distance_sq);
+                        const float distance = glm::max(glm::sqrt(distance_sq), 1e-6f);
 
-                        if (distance < 1e-6f) {
-                            distance = 1e-6f;
-                            d.x = radii_sum;
-                        }
+                        const float overlap = radii_sum - distance;
 
-                        float overlap = radii_sum - distance;
-
-                        glm::vec2 n = d / distance;
+                        const glm::vec2 n = d / distance;
                         
                         p1 -= n * overlap * 0.55f;
                         p2 += n * overlap * 0.55f;
@@ -469,8 +440,23 @@ void App::OnFixedUpdate() {
     }
 }
 
+void App::OnFixedUpdate() {
+    ZoneScoped;
+
+    if (m_paused)
+        return;
+
+    if (m_constants.ParticleCount <= 0)
+        return;
+
+    if (!m_initialized)
+        return;
+
+    SimulationStep(Time::FixedDeltaSeconds());
+}
+
 void App::OnUpdate() {
-    if (Input::JustPressed(Key::P)) {
+    if (Input::JustPressed(Key::Space)) {
         m_paused = !m_paused;
     }
     
@@ -488,6 +474,20 @@ void App::OnUpdate() {
 
     if (Input::JustPressed(Key::R)) {
         InitParticles();
+    }
+    
+    if (m_paused) {
+        static sge::Timer timer = sge::Timer::from_seconds(0.25f, TimerMode::Once);
+        
+        if (Input::JustPressed(Key::F)) {
+            SimulationStep(Time::FixedDeltaSeconds());
+        } else if (Input::Pressed(Key::F)) {
+            if (timer.tick(Time::Delta()).finished()) {
+                SimulationStep(Time::FixedDeltaSeconds());
+            }
+        } else {
+            timer.reset();
+        }
     }
 
     if (Input::Pressed(Key::LeftShift) && Input::Pressed(MouseButton::Left)) {
@@ -649,6 +649,7 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     m_batch->EndOrderMode();
 
     m_renderer->PrepareBatch(*m_batch);
+    m_renderer->UploadBatchData();
 
     m_renderer->BeginPass(simulationTarget, m_simulation_camera);
         m_renderer->Clear(LLGL::ClearValue(0.0f, 0.0f, 0.0f, 1.0f));

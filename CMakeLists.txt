@@ -28,7 +28,6 @@ if (RELEASE_BUILD)
         STRING(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
     else()
         add_compile_options(-O3)
-        # add_compile_options("-fomit-frame-pointer")
         add_compile_options(-fno-exceptions)
         add_compile_options(-march=native)
     endif()
@@ -55,12 +54,14 @@ else()
     message("-- Debug Info: Disabled")
     if(NOT MSVC)
         add_compile_options(-g0)
+        add_compile_options(-fomit-frame-pointer)
     endif()
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 set(LLGL_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
+set(SGE_ENABLE_IMGUI ON)
 
 add_subdirectory(thirdparty/SGE)
 
