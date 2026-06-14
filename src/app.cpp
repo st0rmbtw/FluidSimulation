@@ -110,15 +110,20 @@ void App::InitParticles() {
     const float width = m_simulation_camera.viewport().width * m_constants.PixelToMeter();
     const float height = m_simulation_camera.viewport().height * m_constants.PixelToMeter();
     
-    // Square side size
-    const int a = std::ceil(std::sqrt(m_constants.ParticleCount));
+    // Square height
+    const int size_y = std::ceil(std::sqrt(m_constants.ParticleCount));
 
-    float y = (height - (a * m_constants.ParticleSize)) * 0.5f;
-    for (size_t i = 0; i < a; ++i) {
-        float x = (width - (a * m_constants.ParticleSize)) * 0.5f;
+    // Square width
+    const int size_x = std::ceil(std::sqrt(m_constants.ParticleCount));
 
-        for (size_t j = 0; j < a; ++j) {
-            size_t index = i * a + j;
+    float y = (height - (size_y * m_constants.ParticleSize)) * 0.5f;
+    for (int i = 0; i < size_y; ++i) {
+        float x = (width - (size_x * m_constants.ParticleSize)) * 0.5f;
+
+        const int x_count = glm::min(m_constants.ParticleCount - i * size_x, size_x);
+
+        for (int j = 0; j < x_count; ++j) {
+            size_t index = i * size_x + j;
 
             glm::vec2 pos = glm::vec2(x, y);
             m_positions[index] = pos;
@@ -754,7 +759,7 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
                         }
 
                         if (ImGui::CollapsingHeader(m_language.Constants.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-                            if (ImGui::DragInt(m_language.ParticleCount.c_str(), &m_constants.ParticleCount, 50.0f, 0, INT_MAX)) {
+                            if (ImGui::DragInt(m_language.ParticleCount.c_str(), &m_constants.ParticleCount, 25.0f, 0, INT_MAX)) {
                                 if (m_constants.ParticleCount > 0) {
                                     m_positions.resize(m_constants.ParticleCount);
                                     m_predicted_positions.resize(m_constants.ParticleCount);
