@@ -1,20 +1,21 @@
 #ifndef APP_HPP
 #define APP_HPP
 
-#include "i18n.hpp"
 #pragma once
 
 #include <SGE/types/backend.hpp>
 #include <SGE/renderer/camera.hpp>
 #include <SGE/renderer/batch.hpp>
-#include <SGE/renderer/renderer.hpp>
+#include <SGE/renderer/renderer2d.hpp>
 #include <SGE/engine.hpp>
 
 #include "thread_pool.hpp"
 #include "spatial_lookup.hpp"
+#include "i18n.hpp"
 
 struct AppConfig {
     sge::RenderBackend backend = sge::RenderBackend::OpenGL;
+    uint8_t samples = 8;
     bool vsync = false;
     bool fullscreen = false;
 };
@@ -89,19 +90,8 @@ protected:
     void OnRender(const std::shared_ptr<sge::GlfwWindow>& window) override;
     void OnInputEvent(const sge::InputEvent &event) override;
 
-#if SGE_DEBUG
-    void OnPostRender(const std::shared_ptr<sge::GlfwWindow>& window) override {
-        if (sge::Input::Pressed(sge::Key::C)) {
-            LLGL::FrameProfile profile;
-            GetRenderContext()->GetDebugInfo(&profile);
-            SGE_LOG_INFO("Draw count: {}", profile.commandBufferRecord.drawCommands);
-        }
-    }
-#endif
-
     void OnWindowResized(const std::shared_ptr<sge::GlfwWindow>& window, int width, int height) override {
         m_camera.set_viewport(sge::Size(width, height));
-        m_camera.update();
     }
 
     void OnWindowDestroy(sge::GlfwWindow &window) override {
@@ -124,8 +114,6 @@ private:
 
     void UpdateSpatialLookup(float radius);
 
-    void CreateSceneTarget(LLGL::Extent2D resolution);
-
 private:
     i18n::Language m_language = i18n::GetDefault();
     sge::Camera m_camera = sge::Camera(sge::CameraConfig { .origin = sge::CameraOrigin::TopLeft });
@@ -142,10 +130,8 @@ private:
     std::vector<sge::Rect> m_obstacles;
     sge::Rect m_selection_rect;
     std::unique_ptr<sge::Batch> m_batch;
-    std::unique_ptr<sge::Renderer> m_renderer;
+    std::unique_ptr<sge::Renderer2D> m_renderer;
 
-    sge::Handle<LLGL::RenderTarget> m_render_target;
-    sge::Texture m_target_texture;
     LLGL::Extent2D m_target_resolution;
 
     float m_interaction_strength = 0.0f;

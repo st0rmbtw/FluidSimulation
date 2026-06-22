@@ -69,6 +69,14 @@ int main(int argc, char** argv) {
                 print_render_backends();
                 return 1;
             }
+        } else if (str_eq(argv[i], "--samples")) {
+            if (i >= argc-1) {
+                printf("Specify the number of samples.\n");
+                return 1;
+            }
+
+            const char* arg = argv[i + 1];
+            config.samples = std::stoul(arg);
         } else if (str_eq(argv[i], "--vsync")) {
             config.vsync = true;
         } else if (str_eq(argv[i], "--fullscreen")) {

@@ -204,7 +204,7 @@ glm::vec2 App::CalculateExternalForces(size_t index) {
         gravity_force.y = m_constants.Gravity;
     }
 
-    if (!approx_equals(m_interaction_strength, 0.0f)) {
+    if (!ApproxEquals(m_interaction_strength, 0.0f)) {
         const glm::vec2 input_pos = Input::CursorPosition() * m_constants.PixelToMeter();
         const glm::vec2 offset = input_pos - m_positions[index];
         const float sqr_dst = glm::dot(offset, offset);
@@ -531,31 +531,16 @@ void App::OnInputEvent(const InputEvent& event) {
     Input::ProcessEvent(event);
 }
 
-void App::CreateSceneTarget(LLGL::Extent2D resolution) {
-    GetRenderContext()->DeleteRenderTarget(m_render_target);
-
-    TextureConfig textureConfig;
-    textureConfig.textureType = LLGL::TextureType::Texture2D;
-    textureConfig.extent.width = resolution.width;
-    textureConfig.extent.height = resolution.height;
-    textureConfig.sampler = GetRenderContext()->GetLinearSampler();
-
-    m_target_texture = GetRenderContext()->CreateTexture(textureConfig);
-
-    RenderTargetConfig targetConfig;
-    targetConfig.resolution.width = resolution.width;
-    targetConfig.resolution.height = resolution.height;
-    targetConfig.format = LLGL::Format::RGBA8UNorm;
-    targetConfig.colorAttachments[0] = AttachmentConfig(m_target_texture.internal());
-
-    m_render_target = GetRenderContext()->CreateRenderTarget(targetConfig);
-    m_target_resolution = resolution;
-}
-
 void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     ZoneScoped;
 
-    LLGL::RenderTarget& simulationTarget = GetRenderContext()->GetOrCreateRenderTarget(m_render_target, 4);
+    m_simulation_camera.set_viewport(m_target_resolution);
+
+    auto framebuffer = GetRenderContext()->GetTemporaryFramebuffer(m_target_resolution, LLGL::Format::RGBA8UNorm);
+
+    sge::TextureWithSampler framebufferTexture;
+    framebufferTexture.texture = framebuffer.GetTexture();
+    framebufferTexture.sampler = GetRenderContext()->GetLinearSampler()->internal();
 
     m_batch->Reset();
     m_renderer->Begin();
@@ -656,7 +641,7 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
     m_renderer->PrepareBatch(*m_batch);
     m_renderer->UploadBatchData();
 
-    m_renderer->BeginPass(simulationTarget, m_simulation_camera);
+    m_renderer->BeginPass(*framebuffer.GetRenderTarget(), m_simulation_camera);
         m_renderer->Clear(LLGL::ClearValue(0.0f, 0.0f, 0.0f, 1.0f));
         m_renderer->RenderBatch(*m_batch);
     m_renderer->EndPass();
@@ -732,7 +717,7 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
                         if (avail.y > 0.0f)
                             m_target_resolution.height = static_cast<uint32_t>(avail.y);
 
-                        ImGui::Image((ImTextureID)&m_target_texture, avail);
+                        ImGui::Image((ImTextureID)&framebufferTexture, avail);
                     }
                     ImGui::End();
                     
@@ -819,11 +804,13 @@ void App::OnRender(const std::shared_ptr<GlfwWindow>& window) {
 
     m_renderer->End();
 
-    if (m_target_resolution != simulationTarget.GetResolution()) {
-        CreateSceneTarget(m_target_resolution);
-        m_simulation_camera.set_viewport(m_target_resolution);
-        m_simulation_camera.update();
+    #if SGE_DEBUG
+    if (sge::Input::Pressed(sge::Key::C)) {
+        LLGL::FrameProfile profile;
+        GetRenderContext()->GetDebugInfo(&profile);
+        SGE_LOG_INFO("Draw count: {}", profile.commandBufferRecord.drawCommands);
     }
+    #endif
 }
 
 bool App::OnInit() {
@@ -843,8 +830,8 @@ bool App::OnInit() {
     window_settings.height = window_size.y;
     window_settings.fullscreen = m_config.fullscreen;
     window_settings.vsync = m_config.vsync;
+    window_settings.samples = m_config.samples;
     window_settings.hidden = true;
-    window_settings.samples = 8;
 
     Time::SetFixedTimestepSeconds(1.0 / 360.0);
 
@@ -857,13 +844,12 @@ bool App::OnInit() {
     std::shared_ptr<GlfwWindow> window = result.value();
     m_primary_window_id = window->GetID();
 
-    m_renderer = std::make_unique<Renderer>(GetRenderContext());
+    m_renderer = std::make_unique<Renderer2D>(GetRenderContext());
     m_batch = m_renderer->CreateBatch();
     m_batch->SetIsUi(true);
 
     m_camera.set_viewport(window->GetContentSize());
     m_camera.set_zoom(1.0f);
-    m_camera.update();
 
     m_positions.resize(m_constants.ParticleCount);
     m_predicted_positions.resize(m_constants.ParticleCount);
@@ -874,10 +860,9 @@ bool App::OnInit() {
 
     m_lookup.Resize(m_constants.ParticleCount);
 
-    CreateSceneTarget(LLGL::Extent2D(window_settings.width, window_settings.height));
+    m_target_resolution = LLGL::Extent2D(window_settings.width, window_settings.height);
 
     m_simulation_camera.set_viewport(m_target_resolution);
-    m_simulation_camera.update();
 
     window->ShowWindow();
     
